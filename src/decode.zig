@@ -89,11 +89,10 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
 
         std.debug.assert(mod == 0b11);
         // TODO make these const
-        var dst = lookupRegister(reg, w);
-        var src = lookupRegister(reg_or_mem, w);
-        if (d == 0) std.mem.swap(Register, &dst, &src);
+        const dst = if (d == 1) lookupRegister(reg, w) else lookupRegister(reg_or_mem, w);
+        const src = if (d == 1) lookupRegister(reg_or_mem, w) else lookupRegister(reg, w);
 
-        try writer.print("; 0b{b:0<8} 0b{b:0<8}\n", .{ byte0, byte1 });
+        // try writer.print("; 0b{b:0<8} 0b{b:0<8}\n", .{ byte0, byte1 });
         try writer.print("mov {s}, {s}\n", .{ regToString(dst), regToString(src) });
     }
 }
