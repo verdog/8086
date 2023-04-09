@@ -90,7 +90,7 @@ fn bitsToSum(reg_or_mem: u3, mod: u2) [3]SumOperand {
     };
 }
 
-fn writeDisplacement(ops: [3]SumOperand, immediate_value: u16, writer: anytype) !void {
+fn writeDisplacement(ops: [3]SumOperand, immediate_value: i16, writer: anytype) !void {
     const num_ops = blk: {
         var i: usize = 0;
         for (ops) |op| {
@@ -201,15 +201,16 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
                                 try writer.print("{s}, ", .{reg_name});
                             }
 
-                            const imm_value: u16 = blk: {
+                            const imm_value: i16 = blk: {
                                 if (mod == 0b00 and reg_or_mem != 0b110) {
                                     // instruction is two bytes long w/ no displacement, no action
-                                    // needed here. value will go unused.
+                                    // needed here. imm_value will go unused.
                                     break :blk 0;
                                 } else if (mod == 0b01) {
-                                    // byte displacement
+                                    // byte displacement. these are treated as signed integers and
+                                    // are sign extended (handled implicitly) to an i16 for computation.
                                     i += 1;
-                                    break :blk asm_bin[i];
+                                    break :blk @bitCast(i8, asm_bin[i]);
                                 } else if (mod == 0b10 or (mod == 0b00 and reg_or_mem == 0b110)) {
                                     // word displacement or the special 0b11 case:
                                     // a direct address mov with a two byte operand
@@ -217,7 +218,7 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
                                     const byte2 = asm_bin[i];
                                     i += 1;
                                     const byte3 = asm_bin[i];
-                                    break :blk byte2 | (@as(u16, byte3) << 8);
+                                    break :blk byte2 | (@as(i16, byte3) << 8);
                                 } else {
                                     try writer.print("??? {b} {b}\n", .{ mod, reg_or_mem });
                                     unreachable;
@@ -340,8 +341,13 @@ test "e2e 0039" {
 
 // test "e2e 0040" {
 //     const alctr = std.testing.allocator;
-//     try e2eTest("listing_0039_challenge_movs", alctr);
+//     try e2eTest("listing_0040_challenge_movs", alctr);
 // }
+
+test "e2e negative displacement" {
+    const alctr = std.testing.allocator;
+    try e2eTest("negative_mov", alctr);
+}
 
 const std = @import("std");
 const expectEq = std.testing.expectEqual;
