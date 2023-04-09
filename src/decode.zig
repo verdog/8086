@@ -67,7 +67,6 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         const reg_or_mem = @truncate(u3, byte1);
 
         std.debug.assert(mod == 0b11);
-        // TODO make these const
         const dst = if (d == 1) bitsToReg(reg, w) else bitsToReg(reg_or_mem, w);
         const src = if (d == 1) bitsToReg(reg_or_mem, w) else bitsToReg(reg, w);
 
