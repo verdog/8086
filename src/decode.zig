@@ -29,29 +29,6 @@ fn lookupRegister(reg: u3, w: u1) Register {
     return @intToEnum(Register, i);
 }
 
-const register_strings: [16]*const [2:0]u8 = .{
-    "al",
-    "cl",
-    "dl",
-    "bl",
-    "ah",
-    "ch",
-    "dh",
-    "bh",
-    "ax",
-    "cx",
-    "dx",
-    "bx",
-    "sp",
-    "bp",
-    "si",
-    "di",
-};
-
-fn regToString(reg: Register) *const [2:0]u8 {
-    return register_strings[@enumToInt(reg)];
-}
-
 pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
@@ -93,7 +70,7 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         const src = if (d == 1) lookupRegister(reg_or_mem, w) else lookupRegister(reg, w);
 
         // try writer.print("; 0b{b:0<8} 0b{b:0<8}\n", .{ byte0, byte1 });
-        try writer.print("mov {s}, {s}\n", .{ regToString(dst), regToString(src) });
+        try writer.print("mov {s}, {s}\n", .{ @tagName(dst), @tagName(src) });
     }
 }
 
