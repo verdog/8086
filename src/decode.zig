@@ -36,11 +36,10 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
 
-    // for now, only support 1MB max. there's no technical reason for this, i just picked
-    // it to get the initial version of this function done without thinking. ;)
-    const txt = file.readToEndAlloc(alctr, 1024 * 1024) catch |e| switch (e) {
+    // for now, only support 1GB max.
+    const txt = file.readToEndAlloc(alctr, 1024 * 1024 * 1024) catch |e| switch (e) {
         error.FileTooBig => {
-            std.debug.print("Only input files up to 1MB are supported.\n", .{});
+            std.debug.print("Only input files up to 1GB are supported.\n", .{});
             return e;
         },
         else => return e,
