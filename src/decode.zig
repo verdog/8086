@@ -75,7 +75,7 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
     }
 }
 
-test "lookupRegister" {
+test "bitsToReg" {
     // from table 4-9 in intel 8086 users manual
 
     try expectEq(Register.al, bitsToReg(0b000, 0));
@@ -97,5 +97,78 @@ test "lookupRegister" {
     try expectEq(Register.di, bitsToReg(0b111, 1));
 }
 
+fn e2eTest(comptime basename: []const u8, alctr: std.mem.Allocator) !void {
+    // compile reference asm
+    {
+        const res = try std.ChildProcess.exec(.{
+            .allocator = alctr,
+            .argv = &.{ "nasm", "./asm/" ++ basename ++ ".asm", "-o", "./testfs/" ++ basename },
+        });
+        defer alctr.free(res.stdout);
+        defer alctr.free(res.stderr);
+
+        errdefer std.debug.print("stdout:\n{s}\n", .{res.stdout});
+        errdefer std.debug.print("stderr:\n{s}\n", .{res.stderr});
+        try expectEq(@as(u8, res.term.Exited), 0);
+    }
+
+    // decode binary
+    {
+        const decoded = try std.fs.cwd().createFile("./testfs/" ++ basename ++ ".asm", .{});
+        defer decoded.close();
+        try decodeAndPrintFile("./testfs/" ++ basename, decoded.writer(), alctr);
+    }
+
+    // compile decoded asm
+    {
+        const res = try std.ChildProcess.exec(.{
+            .allocator = alctr,
+            .argv = &.{ "nasm", "./testfs/" ++ basename ++ ".asm", "-o", "./testfs/" ++ basename ++ "2" },
+        });
+        defer alctr.free(res.stdout);
+        defer alctr.free(res.stderr);
+
+        errdefer std.debug.print("stdout:\n{s}\n", .{res.stdout});
+        errdefer std.debug.print("stderr:\n{s}\n", .{res.stderr});
+        try expectEq(@as(u8, res.term.Exited), 0);
+    }
+
+    // ensure they are identical
+    {
+        const ref = try std.fs.cwd().openFile("./testfs/" ++ basename, .{});
+        defer ref.close();
+        const ours = try std.fs.cwd().openFile("./testfs/" ++ basename ++ "2", .{});
+        defer ours.close();
+
+        const ref_data = try ref.readToEndAlloc(alctr, 1024 * 1024);
+        defer alctr.free(ref_data);
+        const ours_data = try ours.readToEndAlloc(alctr, 1024 * 1024);
+        defer alctr.free(ours_data);
+
+        try std.testing.expectEqualSlices(u8, ref_data, ours_data);
+    }
+}
+
+test "e2e 0037" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0037_single_register_mov", alctr);
+}
+
+test "e2e 0038" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0038_many_register_mov", alctr);
+}
+
+// test "e2e 0039" {
+//     const alctr = std.testing.allocator;
+//     try e2eTest("listing_0039_more_movs", alctr);
+// }
+
+// test "e2e 0040" {
+//     const alctr = std.testing.allocator;
+//     try e2eTest("listing_0039_challenge_movs", alctr);
+// }
+
 const std = @import("std");
 const expectEq = std.testing.expectEqual;
+const expect = std.testing.expect;
