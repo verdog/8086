@@ -371,7 +371,7 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         // binary comment
         try writer.print(";", .{});
         for (0..inst.encoded_bytes) |i| {
-            try writer.print(" {b:0<8}", .{asm_bin[inst.binary_index + i]});
+            try writer.print(" {b:0>8}", .{asm_bin[inst.binary_index + i]});
         }
 
         // instruction
