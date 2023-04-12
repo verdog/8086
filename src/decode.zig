@@ -202,15 +202,43 @@ const DecodeIterator = struct {
                 };
             },
 
-            // mem to ax
-            // 1010000w
-            // 0b10100000...0b10100001 => {
-            // },
+            // ax/mem to ax/mem
+            // 101000dw
+            0b10100000...0b10100011 => {
+                // for some reason, the usual d logic is reversed for this instruction.
+                // (it's not actually labeled as a d bit in the manual)
+                const not_d = @truncate(u1, byte0 >> 1);
+                const w = @truncate(u1, byte0);
 
-            // ax to mem
-            // 1010001w
-            // 0b10100010...0b10100011 => {
-            // },
+                defer self.index += @as(u8, 2) + w;
+
+                const byte1 = self.bytes[self.index + 1];
+                const byte2 = self.bytes[self.index + 2];
+                const none = SumOperand{ .none = {} };
+
+                const reg: Register = if (w == 0) .al else .ax;
+                const reg_ops: [3]SumOperand = .{ .{ .reg = reg }, .{ .none = {} }, .{ .none = {} } };
+
+                const addr8 = byte1;
+                const addr16 = (@as(u16, byte2) << 8) | addr8;
+
+                const mem_ops: [3]SumOperand = if (w == 0)
+                    .{ .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } }, .{ .imm = .{ .imm8 = 0 } }, none }
+                else
+                    .{ .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } }, .{ .imm = .{ .imm8 = 0 } }, none };
+
+                var dst = &reg_ops;
+                var src = &mem_ops;
+                if (not_d == 1) std.mem.swap(*const [3]SumOperand, &dst, &src);
+
+                return Instruction{
+                    .mnemonic = .mov,
+                    .destination = dst.*,
+                    .source = src.*,
+                    .encoded_bytes = @as(u8, 2) + w,
+                    .binary_index = self.index,
+                };
+            },
 
             else => {
                 defer self.index += 1;
