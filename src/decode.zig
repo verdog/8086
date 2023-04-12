@@ -22,10 +22,23 @@ const Register = enum(u4) {
     di,
 };
 
-const Immediate = enum(u4) {
-    imm8,
-    imm16,
+const Immediate = union(enum) {
+    imm8: i8,
+    imm16: i16,
 };
+
+const SumOperand = union(enum) {
+    none: void,
+    reg: Register,
+    imm: Immediate,
+};
+
+const Mnemonic = enum {
+    mov,
+    unknown,
+};
+
+// TODO consider merging Register and Immediate
 
 /// convert reg bits and the w flag to a register name
 fn bitsToReg(reg: u3, w: u1) Register {
@@ -37,13 +50,185 @@ fn bitsToReg(reg: u3, w: u1) Register {
     return @intToEnum(Register, i);
 }
 
-const SumOperand = union(enum) {
-    none: void,
-    reg: Register,
-    imm: Immediate,
+const Instruction = struct {
+    mnemonic: Mnemonic,
+    destination: [3]SumOperand,
+    source: [3]SumOperand,
+    encoded_bytes: u8,
+    binary_index: usize,
 };
 
-fn bitsToSum(reg_or_mem: u3, mod: u2) [3]SumOperand {
+const DecodeIterator = struct {
+    bytes: []const u8,
+    index: usize = 0,
+
+    pub fn init(bytes: []const u8) DecodeIterator {
+        return DecodeIterator{
+            .bytes = bytes,
+            .index = 0,
+        };
+    }
+
+    /// decode the next instruction in the buffer. return null at the end
+    pub fn next(self: *DecodeIterator) ?Instruction {
+        const starting_index = self.index;
+        if (self.index >= self.bytes.len) return null;
+
+        const byte0 = self.bytes[self.index];
+        switch (byte0) {
+            // reg/mem to/from reg
+            // 100010dw
+            0b10001000...0b10001011 => {
+                const d = @truncate(u1, byte0 >> 1);
+                const w = @truncate(u1, byte0);
+
+                const byte1 = self.bytes[self.index + 1];
+
+                const mod = @truncate(u2, byte1 >> 6);
+                const reg_bits = @truncate(u3, byte1 >> 3);
+                const rm = @truncate(u3, byte1);
+
+                // all cases read at least 2 bytes
+                defer self.index += 2;
+
+                if (mod == 0b11) {
+                    // simpler reg to reg case
+
+                    const dst = if (d == 1) bitsToReg(reg_bits, w) else bitsToReg(rm, w);
+                    const src = if (d == 1) bitsToReg(rm, w) else bitsToReg(reg_bits, w);
+
+                    const dst_op = SumOperand{ .reg = dst };
+                    const src_op = SumOperand{ .reg = src };
+                    const none = SumOperand{ .none = {} };
+
+                    return Instruction{
+                        .mnemonic = .mov,
+                        .destination = .{ dst_op, none, none },
+                        .source = .{ src_op, none, none },
+                        .encoded_bytes = 2,
+                        .binary_index = self.index,
+                    };
+                }
+
+                // now we're in the rem/mem to reg/mem w/ displacement case
+
+                const none = SumOperand{ .none = {} };
+                const reg: [3]SumOperand = .{ SumOperand{ .reg = bitsToReg(reg_bits, w) }, none, none };
+                const imm_value = blk: {
+                    if (mod == 0b00 and rm != 0b110) {
+                        // instruction is two bytes long w/ no displacement, no action
+                        // needed here.
+                        break :blk none;
+                    } else if (mod == 0b01) {
+                        // byte displacement. these are treated as signed integers and
+                        // are sign extended (handled implicitly) to an i16 for computation.
+                        const byte2 = self.bytes[self.index + 2];
+                        // TODO defer self.index += 1
+                        break :blk SumOperand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
+                    } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
+                        // word displacement or the special 0b11 case:
+                        // a direct address mov with a two byte operand
+                        // TODO defer self.index += 2
+                        const byte2 = self.bytes[self.index + 2];
+                        const byte3 = self.bytes[self.index + 3];
+                        break :blk SumOperand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
+                    } else {
+                        unreachable;
+                    }
+                };
+
+                const additional_size: u8 = switch (imm_value) {
+                    .none => 0,
+                    .imm => |i| switch (i) {
+                        .imm8 => 1,
+                        .imm16 => 2,
+                    },
+                    else => unreachable,
+                };
+                defer self.index += additional_size;
+
+                const formula = bitsToSum(rm, mod, imm_value);
+
+                var dst = &formula;
+                var src = &reg;
+
+                if (d == 1) std.mem.swap(*const [3]SumOperand, &dst, &src);
+
+                return Instruction{
+                    .mnemonic = .mov,
+                    .destination = dst.*,
+                    .source = src.*,
+                    .encoded_bytes = 2 + additional_size,
+                    .binary_index = self.index,
+                };
+            },
+
+            // imm to reg/mem
+            // 1100011w
+            // 0b11000110...0b11000111 => {
+            // },
+
+            // imm to reg
+            // 1011wreg
+            0b10110000...0b10111111 => {
+                const w = @truncate(u1, byte0 >> 3);
+                const reg_bits = @truncate(u3, byte0);
+                defer self.index += @as(u8, 2) + w;
+
+                const byte1 = self.bytes[starting_index + 1];
+
+                const imm_value = blk: {
+                    const byte2 = iblk: {
+                        if (w == 1) {
+                            break :iblk self.bytes[starting_index + 2];
+                        }
+                        break :iblk 0;
+                    };
+
+                    break :blk byte1 | (@as(i16, byte2) << 8);
+                };
+
+                const reg = bitsToReg(reg_bits, w);
+                const reg_op = SumOperand{ .reg = reg };
+                const value_op = SumOperand{ .imm = Immediate{ .imm16 = imm_value } };
+                const none = SumOperand{ .none = {} };
+
+                return Instruction{
+                    .mnemonic = .mov,
+                    .destination = .{ reg_op, none, none },
+                    .source = .{ value_op, none, none },
+                    .encoded_bytes = @as(u8, 2) + w,
+                    .binary_index = self.index,
+                };
+            },
+
+            // mem to ax
+            // 1010000w
+            // 0b10100000...0b10100001 => {
+            // },
+
+            // ax to mem
+            // 1010001w
+            // 0b10100010...0b10100011 => {
+            // },
+
+            else => {
+                defer self.index += 1;
+                const none = SumOperand{ .none = {} };
+
+                return Instruction{
+                    .mnemonic = .unknown,
+                    .destination = .{ none, none, none },
+                    .source = .{ none, none, none },
+                    .encoded_bytes = 1,
+                    .binary_index = self.index,
+                };
+            },
+        }
+    }
+};
+
+fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: SumOperand) [3]SumOperand {
     // mod == 0b11 is a reg to reg move and has no displacement calculation
     std.debug.assert(mod != 0b11);
 
@@ -54,43 +239,50 @@ fn bitsToSum(reg_or_mem: u3, mod: u2) [3]SumOperand {
     i |= reg_or_mem;
 
     const SO = SumOperand;
+    const I = Immediate;
+    const none = SumOperand{ .none = {} };
+
+    // TODO: tame this beast
 
     return switch (i) {
         // mod == 0b00
-        0b00_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, SO{ .none = {} } },
-        0b00_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, SO{ .none = {} } },
-        0b00_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, SO{ .none = {} } },
-        0b00_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, SO{ .none = {} } },
-        0b00_100 => .{ SO{ .reg = .si }, SO{ .none = {} }, SO{ .none = {} } },
-        0b00_101 => .{ SO{ .reg = .di }, SO{ .none = {} }, SO{ .none = {} } },
-        0b00_110 => .{ SO{ .imm = .imm16 }, SO{ .none = {} }, SO{ .none = {} } },
-        0b00_111 => .{ SO{ .reg = .bx }, SO{ .none = {} }, SO{ .none = {} } },
+        0b00_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, none },
+        0b00_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, none },
+        0b00_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, none },
+        0b00_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, none },
+        // these have an immediate zero in them so the printer prints them as effective
+        // address calculations.
+        0b00_100 => .{ SO{ .reg = .si }, SO{ .imm = I{ .imm8 = 0 } }, none },
+        0b00_101 => .{ SO{ .reg = .di }, SO{ .imm = I{ .imm8 = 0 } }, none },
+        0b00_110 => .{ imm_value, SO{ .imm = I{ .imm8 = 0 } }, none },
+        0b00_111 => .{ SO{ .reg = .bx }, SO{ .imm = I{ .imm8 = 0 } }, none },
 
         // mod == 0b01
-        0b01_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, SO{ .imm = .imm8 } },
-        0b01_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, SO{ .imm = .imm8 } },
-        0b01_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, SO{ .imm = .imm8 } },
-        0b01_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, SO{ .imm = .imm8 } },
-        0b01_100 => .{ SO{ .reg = .si }, SO{ .imm = .imm8 }, SO{ .none = {} } },
-        0b01_101 => .{ SO{ .reg = .di }, SO{ .imm = .imm8 }, SO{ .none = {} } },
-        0b01_110 => .{ SO{ .reg = .bp }, SO{ .imm = .imm8 }, SO{ .none = {} } },
-        0b01_111 => .{ SO{ .reg = .bx }, SO{ .imm = .imm8 }, SO{ .none = {} } },
+        0b01_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, imm_value },
+        0b01_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, imm_value },
+        0b01_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, imm_value },
+        0b01_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, imm_value },
+        0b01_100 => .{ SO{ .reg = .si }, imm_value, none },
+        0b01_101 => .{ SO{ .reg = .di }, imm_value, none },
+        0b01_110 => .{ SO{ .reg = .bp }, imm_value, none },
+        0b01_111 => .{ SO{ .reg = .bx }, imm_value, none },
 
         // mod == 0b10
-        0b10_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, SO{ .imm = .imm16 } },
-        0b10_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, SO{ .imm = .imm16 } },
-        0b10_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, SO{ .imm = .imm16 } },
-        0b10_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, SO{ .imm = .imm16 } },
-        0b10_100 => .{ SO{ .reg = .si }, SO{ .imm = .imm16 }, SO{ .none = {} } },
-        0b10_101 => .{ SO{ .reg = .di }, SO{ .imm = .imm16 }, SO{ .none = {} } },
-        0b10_110 => .{ SO{ .reg = .bp }, SO{ .imm = .imm16 }, SO{ .none = {} } },
-        0b10_111 => .{ SO{ .reg = .bx }, SO{ .imm = .imm16 }, SO{ .none = {} } },
+        0b10_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, imm_value },
+        0b10_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, imm_value },
+        0b10_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, imm_value },
+        0b10_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, imm_value },
+        0b10_100 => .{ SO{ .reg = .si }, imm_value, none },
+        0b10_101 => .{ SO{ .reg = .di }, imm_value, none },
+        0b10_110 => .{ SO{ .reg = .bp }, imm_value, none },
+        0b10_111 => .{ SO{ .reg = .bx }, imm_value, none },
 
         else => unreachable,
     };
 }
 
-fn writeDisplacement(ops: [3]SumOperand, immediate_value: i16, writer: anytype) !void {
+// TODO rename. this is used as a general purpose lhs/rhs printing function now.
+fn writeDisplacement(ops: [3]SumOperand, writer: anytype) !void {
     const num_ops = blk: {
         var i: usize = 0;
         for (ops) |op| {
@@ -99,28 +291,27 @@ fn writeDisplacement(ops: [3]SumOperand, immediate_value: i16, writer: anytype) 
         }
         break :blk i;
     };
-    std.debug.assert(num_ops > 0);
 
-    try writer.print("[ ", .{});
+    if (num_ops > 1) try writer.print("[", .{});
 
     for (ops, 0..) |op, i| {
         switch (op) {
             .none => {},
             .reg => |r| {
-                // TODO offset might be negative
-                if (i > 0) try writer.print("+ ", .{});
-                try writer.print("{s} ", .{@tagName(r)});
+                if (i > 0) try writer.print("+", .{});
+                try writer.print("{s}", .{@tagName(r)});
             },
-            .imm => {
+            .imm => |ival| {
                 // TODO offset might be negative
-                if (i > 0) try writer.print("+ ", .{});
+                if (i > 0) try writer.print("+", .{});
                 // TODO print in hex with dec in comment
-                try writer.print("{} ", .{immediate_value});
+                const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
+                try writer.print("{}", .{pval});
             },
         }
     }
 
-    try writer.print("]", .{});
+    if (num_ops > 1) try writer.print("]", .{});
 }
 
 pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
@@ -140,114 +331,63 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
     try writer.print("; disassembly of {s}:\n", .{filename});
     try writer.print("bits 16\n\n", .{});
 
-    var i: usize = 0;
-    while (i < asm_bin.len) : (i += 1) {
-        const byte0 = asm_bin[i];
+    var instructions = std.ArrayList(Instruction).init(alctr);
+    defer instructions.deinit();
 
-        { // check for a 4 bit opcode
-            const opcode_hi_4 = @truncate(u4, byte0 >> 4);
-            switch (opcode_hi_4) {
-                0b1011 => {
-                    const w = @truncate(u1, byte0 >> 3);
-                    const reg = @truncate(u3, byte0);
-
-                    i += 1;
-                    const byte1 = asm_bin[i];
-
-                    const imm_value = blk: {
-                        const byte2 = iblk: {
-                            if (w == 1) {
-                                i += 1;
-                                break :iblk asm_bin[i];
-                            }
-                            break :iblk 0;
-                        };
-
-                        break :blk byte1 | (@as(u16, byte2) << 8);
-                    };
-
-                    const reg_name = @tagName(bitsToReg(reg, w));
-                    try writer.print("mov {s}, {}\n", .{ reg_name, imm_value });
-
-                    continue;
-                },
-                else => {}, // fall through to 6 bit opcodes
-            }
-        }
-
-        { // check for a 6 bit opcode
-            const opcode_hi_6 = @truncate(u6, byte0 >> 2);
-            switch (opcode_hi_6) {
-                0b100010 => {
-                    // reg/mem to/from reg. see table 4-10
-                    const d = @truncate(u1, byte0 >> 1);
-                    const w = @truncate(u1, byte0);
-
-                    i += 1;
-                    const byte1 = asm_bin[i];
-
-                    const mod = @truncate(u2, byte1 >> 6);
-                    const reg = @truncate(u3, byte1 >> 3);
-                    const reg_or_mem = @truncate(u3, byte1);
-
-                    switch (mod) {
-                        0b00, 0b01, 0b10 => {
-                            const formula = bitsToSum(reg_or_mem, mod);
-                            const reg_name = @tagName(bitsToReg(reg, w));
-
-                            try writer.print("mov ", .{});
-
-                            if (d == 1) {
-                                try writer.print("{s}, ", .{reg_name});
-                            }
-
-                            const imm_value: i16 = blk: {
-                                if (mod == 0b00 and reg_or_mem != 0b110) {
-                                    // instruction is two bytes long w/ no displacement, no action
-                                    // needed here. imm_value will go unused.
-                                    break :blk 0;
-                                } else if (mod == 0b01) {
-                                    // byte displacement. these are treated as signed integers and
-                                    // are sign extended (handled implicitly) to an i16 for computation.
-                                    i += 1;
-                                    break :blk @bitCast(i8, asm_bin[i]);
-                                } else if (mod == 0b10 or (mod == 0b00 and reg_or_mem == 0b110)) {
-                                    // word displacement or the special 0b11 case:
-                                    // a direct address mov with a two byte operand
-                                    i += 1;
-                                    const byte2 = asm_bin[i];
-                                    i += 1;
-                                    const byte3 = asm_bin[i];
-                                    break :blk byte2 | (@as(i16, byte3) << 8);
-                                } else {
-                                    try writer.print("??? {b} {b}\n", .{ mod, reg_or_mem });
-                                    unreachable;
-                                }
-                            };
-
-                            try writeDisplacement(formula, imm_value, writer);
-
-                            if (d == 0) {
-                                try writer.print(", {s}", .{reg_name});
-                            }
-
-                            try writer.print("\n", .{});
-                        },
-                        0b11 => {
-                            const dst = if (d == 1) bitsToReg(reg, w) else bitsToReg(reg_or_mem, w);
-                            const src = if (d == 1) bitsToReg(reg_or_mem, w) else bitsToReg(reg, w);
-
-                            try writer.print("; 0b{b:0<8} 0b{b:0<8}\n", .{ byte0, byte1 });
-                            try writer.print("mov {s}, {s}\n", .{ @tagName(dst), @tagName(src) });
-                        },
-                    }
-                },
-                else => {
-                    try writer.print("; warning: unknown opcode byte 0b{b:0<8}\n", .{byte0});
-                },
-            }
-        }
+    var decoder = DecodeIterator.init(asm_bin);
+    while (decoder.next()) |inst| {
+        try instructions.append(inst);
     }
+
+    for (instructions.items) |inst| {
+        // binary comment
+        try writer.print(";", .{});
+        for (0..inst.encoded_bytes) |i| {
+            try writer.print(" {b:0<8}", .{asm_bin[inst.binary_index + i]});
+        }
+
+        // instruction
+        try writer.print("\n{s} ", .{@tagName(inst.mnemonic)});
+        try writeDisplacement(inst.destination, writer);
+        try writer.print(", ", .{});
+        try writeDisplacement(inst.source, writer);
+        try writer.print("\n\n", .{});
+    }
+
+    // var i: usize = 0;
+    // while (i < asm_bin.len) : (i += 1) {
+    //     const byte0 = asm_bin[i];
+    //
+    //     { // check for a 6 bit opcode
+    //         const opcode_hi_6 = @truncate(u6, byte0 >> 2);
+    //         switch (opcode_hi_6) {
+    //             0b100010 => {
+    //                 }
+    //             },
+    //             else => {}, // fall through to 7 bit opcodes
+    //         }
+    //     }
+    //
+    //     { // check for a 7 bit opcode
+    //         const opcode_hi_7 = @truncate(u7, byte0 >> 1);
+    //         switch (opcode_hi_7) {
+    //             0b1100011 => {
+    //                 // immediate to register/memory
+    //                 const w = @truncate(u1, byte0);
+    //                 _ = w;
+    //
+    //                 i += 1;
+    //                 const byte1 = asm_bin[i];
+    //
+    //                 const mod = @truncate(u2, byte1 >> 6);
+    //                 _ = mod;
+    //                 const reg_or_mem = @truncate(u3, byte1);
+    //                 _ = reg_or_mem;
+    //             },
+    //             else => try writer.print("; warning: unknown opcode byte 0b{b:0<8}\n", .{byte0}),
+    //         }
+    //     }
+    // }
 }
 
 test "bitsToReg" {
