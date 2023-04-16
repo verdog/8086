@@ -96,8 +96,15 @@ const DecodeIterator = struct {
             0b11000110...0b11000111, // imm to reg/mem, 1100011w
             => {
                 // if true, there is an immediate value on the end ([ data lo ] [ data hi])
+                //
+                // TODO maybe we can break this down even further. it would be nice to
+                // have to seperate branches for has_immediate and !has_immediate, since
+                // they *are* different. for now, the benefit of sharing their very
+                // similar decoding logic outweights the readability penalty of having a
+                // flag at the top of the function that can subtly change logic... i hope.
                 const has_immediate = byte0 & 0b11111110 == 0b11000110;
-                const d = @truncate(u1, byte0 >> 1); // unused in the imm to reg/mem case
+
+                const d = @truncate(u1, byte0 >> 1);
                 const w = @truncate(u1, byte0);
 
                 // [ mod/reg/rm ]
@@ -132,8 +139,9 @@ const DecodeIterator = struct {
 
                 // now we're in the rem/mem/imm to reg/mem w/ possible displacement case
 
-                // assume that the location described in [mod/reg/rm] is the destination
-                // for now. if the d bit is set, we will swap them at the very end.
+                // assume that the location described in [mod/reg/rm] and [displo/hi] is
+                // the destination for now. if the d bit is set, we will swap them at the
+                // very end.
 
                 // get the displacement, if applicable
                 const displacement = blk: {
@@ -167,12 +175,12 @@ const DecodeIterator = struct {
                 };
                 defer self.index += displacement_size;
 
-                // now we can finally get the destination from [mod/reg/rm] and [displo]/disphi]
+                // now we can finally get the destination from [mod/reg/rm] and [displo]/[disphi]
                 const dst = bitsToSrcDst(rm, mod, displacement);
 
                 // now get the source. again, for now, we assume that the source is the
-                // reg in [mod/reg/rm] or the immediate in the case of has_immediate. we
-                // will check the d bit and swap at necessary at the end.
+                // reg/mem in [mod/reg/rm] or the immediate in the case of has_immediate.
+                // we will check the d bit and swap as necessary at the end.
 
                 const src_op = blk: {
                     if (has_immediate) {
@@ -197,8 +205,8 @@ const DecodeIterator = struct {
 
                 const src = makeSrcDst(1, .{src_op});
 
-                // swap src and dst if the d bit is not set. in imm to reg/mem, the d bit is
-                // always 1.
+                // swap src and dst if the d bit is not set. watch out, in imm to reg/mem,
+                // the d bit is always 1.
                 var src_ptr = &src;
                 var dst_ptr = &dst;
 
