@@ -560,6 +560,16 @@ test "e2e negative displacement" {
     try e2eTest("negative_mov", alctr);
 }
 
+// test "e2e 0041" {
+//     const alctr = std.testing.allocator;
+//     try e2eTest("listing_0041_add_sub_cmp_jnz", alctr);
+// }
+
+// test "e2e 0042" {
+//     const alctr = std.testing.allocator;
+//     try e2eTest("listing_0042_completionist_decode", alctr);
+// }
+
 const std = @import("std");
 const expectEq = std.testing.expectEqual;
 const expect = std.testing.expect;
