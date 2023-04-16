@@ -33,6 +33,19 @@ const Operand = union(enum) {
 const Mnemonic = enum {
     mov,
     unknown,
+
+    pub fn init(byte: u8) Mnemonic {
+        // see table 4-12
+        return switch (byte) {
+            0b10001000...0b10001011, // mov reg/mem to/from reg
+            0b11000110...0b11000111, // mov imm to reg/mem
+            0b10110000...0b10111111, // mov imm to reg
+            0b10100000...0b10100011, // mov ax/mem to ax/mem
+            => return .mov,
+
+            else => return .unknown,
+        };
+    }
 };
 
 // TODO consider merging Register and Immediate
@@ -259,7 +272,7 @@ const DecodeIterator = struct {
                 const reg_op = Operand{ .reg = reg };
 
                 return Instruction{
-                    .mnemonic = .mov,
+                    .mnemonic = Mnemonic.init(byte0),
                     .destination = makeSrcDst(1, .{reg_op}),
                     .source = makeSrcDst(1, .{imm}),
                     .encoded_bytes = @as(u8, 2) + w,
@@ -302,7 +315,7 @@ const DecodeIterator = struct {
                 if (not_d == 1) std.mem.swap(*const [3]Operand, &dst, &src);
 
                 return Instruction{
-                    .mnemonic = .mov,
+                    .mnemonic = Mnemonic.init(byte0),
                     .destination = dst.*,
                     .source = src.*,
                     .encoded_bytes = @as(u8, 2) + w,
