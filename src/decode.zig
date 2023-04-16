@@ -123,12 +123,10 @@ const DecodeIterator = struct {
                         // byte displacement. these are treated as signed integers and
                         // are sign extended (handled implicitly) to an i16 for computation.
                         const byte2 = self.bytes[self.index + 2];
-                        // TODO defer self.index += 1
                         break :blk SumOperand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
                     } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
                         // word displacement or the special 0b11 case:
                         // a direct address mov with a two byte operand
-                        // TODO defer self.index += 2
                         const byte2 = self.bytes[self.index + 2];
                         const byte3 = self.bytes[self.index + 3];
                         break :blk SumOperand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
@@ -165,8 +163,81 @@ const DecodeIterator = struct {
 
             // imm to reg/mem
             // 1100011w
-            // 0b11000110...0b11000111 => {
-            // },
+            0b11000110...0b11000111 => {
+                const w = @truncate(u1, byte0);
+
+                const byte1 = self.bytes[self.index + 1];
+                const mod = @truncate(u2, byte1 >> 6);
+                const rm = @truncate(u3, byte1);
+
+                std.debug.assert(mod != 0b11);
+                if (mod == 0b11) {
+                    // not sure if this case actually happens
+                    std.debug.print("Somehow found an immediate to register instruction encoded the long way? Panic!\n", .{});
+                    unreachable;
+                }
+
+                // all encodings use the first two bytes
+                defer self.index += 2;
+
+                const displacement = blk: {
+                    const none = SumOperand{ .none = {} };
+                    if (mod == 0b00 and rm != 0b110) {
+                        // instruction is two bytes long w/ no displacement, no action
+                        // needed here.
+                        break :blk none;
+                    } else if (mod == 0b01) {
+                        // byte displacement. these are treated as signed integers and
+                        // are sign extended (handled implicitly) to an i16 for computation.
+                        const byte2 = self.bytes[self.index + 2];
+                        break :blk SumOperand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
+                    } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
+                        // word displacement or the special 0b11 case:
+                        // a direct address mov with a two byte operand
+                        const byte2 = self.bytes[self.index + 2];
+                        const byte3 = self.bytes[self.index + 3];
+                        break :blk SumOperand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
+                    } else {
+                        unreachable;
+                    }
+                };
+
+                const disp_width: u8 = switch (displacement) {
+                    .none => 0,
+                    .imm => |i| switch (i) {
+                        .imm8 => 1,
+                        .imm16 => 2,
+                    },
+                    else => unreachable,
+                };
+                defer self.index += disp_width;
+
+                const dst = bitsToSum(rm, mod, displacement);
+
+                // get immediate
+                const immediate = blk: {
+                    var byte_low: u8 = self.bytes[self.index + 2 + disp_width];
+                    var byte_high: u8 = if (w == 1) self.bytes[self.index + 2 + disp_width + 1] else undefined;
+
+                    if (w == 0) {
+                        break :blk SumOperand{ .imm = .{ .imm8 = @bitCast(i8, byte_low) } };
+                    } else {
+                        break :blk SumOperand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
+                    }
+                };
+                defer self.index += @as(u8, 1) + w;
+
+                const none = SumOperand{ .none = {} };
+                const src: [3]SumOperand = .{ immediate, none, none };
+
+                return Instruction{
+                    .mnemonic = .mov,
+                    .destination = dst,
+                    .source = src,
+                    .encoded_bytes = @as(u8, 2) + disp_width + 1 + w,
+                    .binary_index = self.index,
+                };
+            },
 
             // imm to reg
             // 1011wreg
@@ -177,26 +248,23 @@ const DecodeIterator = struct {
 
                 const byte1 = self.bytes[starting_index + 1];
 
-                const imm_value = blk: {
-                    const byte2 = iblk: {
-                        if (w == 1) {
-                            break :iblk self.bytes[starting_index + 2];
-                        }
-                        break :iblk 0;
-                    };
+                const imm = blk: {
+                    const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
 
-                    break :blk byte1 | (@as(i16, byte2) << 8);
+                    break :blk if (w == 0)
+                        SumOperand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } }
+                    else
+                        SumOperand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
                 };
 
                 const reg = bitsToReg(reg_bits, w);
                 const reg_op = SumOperand{ .reg = reg };
-                const value_op = SumOperand{ .imm = Immediate{ .imm16 = imm_value } };
                 const none = SumOperand{ .none = {} };
 
                 return Instruction{
                     .mnemonic = .mov,
                     .destination = .{ reg_op, none, none },
-                    .source = .{ value_op, none, none },
+                    .source = .{ imm, none, none },
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
                 };
@@ -320,26 +388,37 @@ fn writeDisplacement(ops: [3]SumOperand, writer: anytype) !void {
         break :blk i;
     };
 
-    if (num_ops > 1) try writer.print("[", .{});
-
-    for (ops, 0..) |op, i| {
-        switch (op) {
+    if (num_ops == 1) {
+        switch (ops[0]) {
             .none => {},
-            .reg => |r| {
-                if (i > 0) try writer.print("+", .{});
-                try writer.print("{s}", .{@tagName(r)});
-            },
-            .imm => |ival| {
-                // TODO offset might be negative
-                if (i > 0) try writer.print("+", .{});
-                // TODO print in hex with dec in comment
-                const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
-                try writer.print("{}", .{pval});
+            .reg => |r| try writer.print("{s}", .{@tagName(r)}),
+            .imm => |iv| {
+                switch (iv) {
+                    .imm8 => try writer.print("byte {}", .{iv.imm8}),
+                    .imm16 => try writer.print("word {}", .{iv.imm16}),
+                }
             },
         }
+    } else {
+        try writer.print("[", .{});
+        for (ops, 0..) |op, i| {
+            switch (op) {
+                .none => {},
+                .reg => |r| {
+                    if (i > 0) try writer.print("+", .{});
+                    try writer.print("{s}", .{@tagName(r)});
+                },
+                .imm => |ival| {
+                    // TODO offset might be negative
+                    if (i > 0) try writer.print("+", .{});
+                    // TODO print in hex with dec in comment
+                    const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
+                    try writer.print("{}", .{pval});
+                },
+            }
+        }
+        try writer.print("]", .{});
     }
-
-    if (num_ops > 1) try writer.print("]", .{});
 }
 
 pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
@@ -507,10 +586,15 @@ test "e2e 0039" {
     try e2eTest("listing_0039_more_movs", alctr);
 }
 
-// test "e2e 0040" {
-//     const alctr = std.testing.allocator;
-//     try e2eTest("listing_0040_challenge_movs", alctr);
-// }
+test "e2e 0040" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0040_challenge_movs", alctr);
+}
+
+test "e2e 0040 positive" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0040_challenge_movs_positive", alctr);
+}
 
 test "e2e negative displacement" {
     const alctr = std.testing.allocator;
