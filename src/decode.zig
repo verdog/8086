@@ -4,35 +4,32 @@
 /// table 4-9 in the 8086 users manual (page 263). the reg field is combined with the w
 /// bit to make a number that maps to an enum value. see bitsToReg.
 const Register = enum(u4) {
-    al,
-    cl,
-    dl,
-    bl,
-    ah,
-    ch,
-    dh,
-    bh,
-    ax,
-    cx,
-    dx,
-    bx,
-    sp,
-    bp,
-    si,
-    di,
+    // zig fmt: off
+    al, cl, dl, bl, // a, b, c, d low. (byte)
+    ah, ch, dh, bh, // a, b, c, d high. (byte)
+    ax, cx, dx, bx, // a, b, c, d wide. (word, aka two bytes)
+    sp, bp, si, di, // stack pointer, base pointer, source and destination. (word)
+    // zig fmt: on
 };
 
+/// Instruction encoded immediate value.
 const Immediate = union(enum) {
     imm8: i8,
     imm16: i16,
 };
 
-const SumOperand = union(enum) {
+/// An instruction operand. In practice, instructions can involve 3 operands for a single
+/// source or destination (see table 4-20 and the Instruction struct). To simplify
+/// instruction representation, we assume every source or destination involves 3 operands.
+/// When they in reality involve less, we fill in the buffer with `none`s.
+const Operand = union(enum) {
     none: void,
     reg: Register,
     imm: Immediate,
 };
 
+/// Assembly mnemonic. These should match the assembly language exactly, as the printing
+/// logic uses @tagName to get the strings at print time.
 const Mnemonic = enum {
     mov,
     unknown,
@@ -40,7 +37,7 @@ const Mnemonic = enum {
 
 // TODO consider merging Register and Immediate
 
-/// convert reg bits and the w flag to a register name
+/// Convert reg bits and the w flag to a register name.
 fn bitsToReg(reg: u3, w: u1) Register {
     // see table 4-9 in the 8086 users manual. we combine the bits into a 4 bit number,
     // taking w to be the most significant bit
@@ -50,14 +47,20 @@ fn bitsToReg(reg: u3, w: u1) Register {
     return @intToEnum(Register, i);
 }
 
+/// The main instruction struct. Each instruction is decoded into an instance of this.
 const Instruction = struct {
     mnemonic: Mnemonic,
-    destination: [3]SumOperand,
-    source: [3]SumOperand,
+    /// Destination operand(s). Some instructions only make use of 1 or 2 operands, in
+    /// which case the decoder will fill the buffer with `Operand.none`.
+    destination: [3]Operand,
+    /// Source operands(s). Uses the same `none` packing logic as `destination`.
+    source: [3]Operand,
+    /// Size of the operand in machine code.
     encoded_bytes: u8,
     binary_index: usize,
 };
 
+/// Iterate through a byte buffer and produce `Instruction`s.
 const DecodeIterator = struct {
     bytes: []const u8,
     index: usize = 0,
@@ -69,7 +72,7 @@ const DecodeIterator = struct {
         };
     }
 
-    /// decode the next instruction in the buffer. return null at the end
+    /// Decode the next instruction in the buffer. return null at the end.
     pub fn next(self: *DecodeIterator) ?Instruction {
         const starting_index = self.index;
         if (self.index >= self.bytes.len) return null;
@@ -97,9 +100,9 @@ const DecodeIterator = struct {
                     const dst = if (d == 1) bitsToReg(reg_bits, w) else bitsToReg(rm, w);
                     const src = if (d == 1) bitsToReg(rm, w) else bitsToReg(reg_bits, w);
 
-                    const dst_op = SumOperand{ .reg = dst };
-                    const src_op = SumOperand{ .reg = src };
-                    const none = SumOperand{ .none = {} };
+                    const dst_op = Operand{ .reg = dst };
+                    const src_op = Operand{ .reg = src };
+                    const none = Operand{ .none = {} };
 
                     return Instruction{
                         .mnemonic = .mov,
@@ -112,8 +115,8 @@ const DecodeIterator = struct {
 
                 // now we're in the rem/mem to reg/mem w/ displacement case
 
-                const none = SumOperand{ .none = {} };
-                const reg: [3]SumOperand = .{ SumOperand{ .reg = bitsToReg(reg_bits, w) }, none, none };
+                const none = Operand{ .none = {} };
+                const reg: [3]Operand = .{ Operand{ .reg = bitsToReg(reg_bits, w) }, none, none };
                 const imm_value = blk: {
                     if (mod == 0b00 and rm != 0b110) {
                         // instruction is two bytes long w/ no displacement, no action
@@ -123,13 +126,13 @@ const DecodeIterator = struct {
                         // byte displacement. these are treated as signed integers and
                         // are sign extended (handled implicitly) to an i16 for computation.
                         const byte2 = self.bytes[self.index + 2];
-                        break :blk SumOperand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
+                        break :blk Operand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
                     } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
                         // word displacement or the special 0b11 case:
                         // a direct address mov with a two byte operand
                         const byte2 = self.bytes[self.index + 2];
                         const byte3 = self.bytes[self.index + 3];
-                        break :blk SumOperand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
+                        break :blk Operand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
                     } else {
                         unreachable;
                     }
@@ -150,7 +153,7 @@ const DecodeIterator = struct {
                 var dst = &formula;
                 var src = &reg;
 
-                if (d == 1) std.mem.swap(*const [3]SumOperand, &dst, &src);
+                if (d == 1) std.mem.swap(*const [3]Operand, &dst, &src);
 
                 return Instruction{
                     .mnemonic = .mov,
@@ -181,7 +184,7 @@ const DecodeIterator = struct {
                 defer self.index += 2;
 
                 const displacement = blk: {
-                    const none = SumOperand{ .none = {} };
+                    const none = Operand{ .none = {} };
                     if (mod == 0b00 and rm != 0b110) {
                         // instruction is two bytes long w/ no displacement, no action
                         // needed here.
@@ -190,13 +193,13 @@ const DecodeIterator = struct {
                         // byte displacement. these are treated as signed integers and
                         // are sign extended (handled implicitly) to an i16 for computation.
                         const byte2 = self.bytes[self.index + 2];
-                        break :blk SumOperand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
+                        break :blk Operand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
                     } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
                         // word displacement or the special 0b11 case:
                         // a direct address mov with a two byte operand
                         const byte2 = self.bytes[self.index + 2];
                         const byte3 = self.bytes[self.index + 3];
-                        break :blk SumOperand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
+                        break :blk Operand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
                     } else {
                         unreachable;
                     }
@@ -220,15 +223,15 @@ const DecodeIterator = struct {
                     var byte_high: u8 = if (w == 1) self.bytes[self.index + 2 + disp_width + 1] else undefined;
 
                     if (w == 0) {
-                        break :blk SumOperand{ .imm = .{ .imm8 = @bitCast(i8, byte_low) } };
+                        break :blk Operand{ .imm = .{ .imm8 = @bitCast(i8, byte_low) } };
                     } else {
-                        break :blk SumOperand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
+                        break :blk Operand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
                     }
                 };
                 defer self.index += @as(u8, 1) + w;
 
-                const none = SumOperand{ .none = {} };
-                const src: [3]SumOperand = .{ immediate, none, none };
+                const none = Operand{ .none = {} };
+                const src: [3]Operand = .{ immediate, none, none };
 
                 return Instruction{
                     .mnemonic = .mov,
@@ -252,14 +255,14 @@ const DecodeIterator = struct {
                     const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
 
                     break :blk if (w == 0)
-                        SumOperand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } }
+                        Operand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } }
                     else
-                        SumOperand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
+                        Operand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
                 };
 
                 const reg = bitsToReg(reg_bits, w);
-                const reg_op = SumOperand{ .reg = reg };
-                const none = SumOperand{ .none = {} };
+                const reg_op = Operand{ .reg = reg };
+                const none = Operand{ .none = {} };
 
                 return Instruction{
                     .mnemonic = .mov,
@@ -282,22 +285,22 @@ const DecodeIterator = struct {
 
                 const byte1 = self.bytes[self.index + 1];
                 const byte2 = self.bytes[self.index + 2];
-                const none = SumOperand{ .none = {} };
+                const none = Operand{ .none = {} };
 
                 const reg: Register = if (w == 0) .al else .ax;
-                const reg_ops: [3]SumOperand = .{ .{ .reg = reg }, .{ .none = {} }, .{ .none = {} } };
+                const reg_ops: [3]Operand = .{ .{ .reg = reg }, .{ .none = {} }, .{ .none = {} } };
 
                 const addr8 = byte1;
                 const addr16 = (@as(u16, byte2) << 8) | addr8;
 
-                const mem_ops: [3]SumOperand = if (w == 0)
+                const mem_ops: [3]Operand = if (w == 0)
                     .{ .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } }, .{ .imm = .{ .imm8 = 0 } }, none }
                 else
                     .{ .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } }, .{ .imm = .{ .imm8 = 0 } }, none };
 
                 var dst = &reg_ops;
                 var src = &mem_ops;
-                if (not_d == 1) std.mem.swap(*const [3]SumOperand, &dst, &src);
+                if (not_d == 1) std.mem.swap(*const [3]Operand, &dst, &src);
 
                 return Instruction{
                     .mnemonic = .mov,
@@ -310,7 +313,7 @@ const DecodeIterator = struct {
 
             else => {
                 defer self.index += 1;
-                const none = SumOperand{ .none = {} };
+                const none = Operand{ .none = {} };
 
                 return Instruction{
                     .mnemonic = .unknown,
@@ -324,7 +327,7 @@ const DecodeIterator = struct {
     }
 };
 
-fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: SumOperand) [3]SumOperand {
+fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: Operand) [3]Operand {
     // mod == 0b11 is a reg to reg move and has no displacement calculation
     std.debug.assert(mod != 0b11);
 
@@ -334,9 +337,9 @@ fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: SumOperand) [3]SumOperand {
     i <<= 3;
     i |= reg_or_mem;
 
-    const SO = SumOperand;
+    const SO = Operand;
     const I = Immediate;
-    const none = SumOperand{ .none = {} };
+    const none = Operand{ .none = {} };
 
     // TODO: tame this beast
 
@@ -378,7 +381,7 @@ fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: SumOperand) [3]SumOperand {
 }
 
 // TODO rename. this is used as a general purpose lhs/rhs printing function now.
-fn writeDisplacement(ops: [3]SumOperand, writer: anytype) !void {
+fn writeDisplacement(ops: [3]Operand, writer: anytype) !void {
     const num_ops = blk: {
         var i: usize = 0;
         for (ops) |op| {
@@ -460,41 +463,6 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         try writeDisplacement(inst.source, writer);
         try writer.print("\n\n", .{});
     }
-
-    // var i: usize = 0;
-    // while (i < asm_bin.len) : (i += 1) {
-    //     const byte0 = asm_bin[i];
-    //
-    //     { // check for a 6 bit opcode
-    //         const opcode_hi_6 = @truncate(u6, byte0 >> 2);
-    //         switch (opcode_hi_6) {
-    //             0b100010 => {
-    //                 }
-    //             },
-    //             else => {}, // fall through to 7 bit opcodes
-    //         }
-    //     }
-    //
-    //     { // check for a 7 bit opcode
-    //         const opcode_hi_7 = @truncate(u7, byte0 >> 1);
-    //         switch (opcode_hi_7) {
-    //             0b1100011 => {
-    //                 // immediate to register/memory
-    //                 const w = @truncate(u1, byte0);
-    //                 _ = w;
-    //
-    //                 i += 1;
-    //                 const byte1 = asm_bin[i];
-    //
-    //                 const mod = @truncate(u2, byte1 >> 6);
-    //                 _ = mod;
-    //                 const reg_or_mem = @truncate(u3, byte1);
-    //                 _ = reg_or_mem;
-    //             },
-    //             else => try writer.print("; warning: unknown opcode byte 0b{b:0<8}\n", .{byte0}),
-    //         }
-    //     }
-    // }
 }
 
 test "bitsToReg" {
@@ -519,6 +487,12 @@ test "bitsToReg" {
     try expectEq(Register.di, bitsToReg(0b111, 1));
 }
 
+/// Run an end to end decoder test. Given a "basename" that represents a file,
+/// 1. Compile ./asm/<basename>.asm to a ./testfs/<basename> binary using nasm
+/// 2. Decode the ./asm/<basename> binary with our decoder and write the decoded assembly
+///    to ./testfs/<basename>.asm
+/// 3. Compile the ./testfs/<basename>.asm to a ./testfs/<basename>2 binary using nasm
+/// 4. Assert that the ./testfs/<basename> and ./testfs/<basename>2 binaries are identical
 fn e2eTest(comptime basename: []const u8, alctr: std.mem.Allocator) !void {
     // compile reference asm
     {
