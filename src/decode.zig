@@ -241,12 +241,11 @@ const DecodeIterator = struct {
 
                 const reg = bitsToReg(reg_bits, w);
                 const reg_op = Operand{ .reg = reg };
-                const none = Operand{ .none = {} };
 
                 return Instruction{
                     .mnemonic = .mov,
-                    .destination = .{ reg_op, none, none },
-                    .source = .{ imm, none, none },
+                    .destination = makeSrcDst(1, .{reg_op}),
+                    .source = makeSrcDst(1, .{imm}),
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
                 };
@@ -264,7 +263,6 @@ const DecodeIterator = struct {
 
                 const byte1 = self.bytes[self.index + 1];
                 const byte2 = self.bytes[self.index + 2];
-                const none = Operand{ .none = {} };
 
                 const reg: Register = if (w == 0) .al else .ax;
                 const reg_ops: [3]Operand = .{ .{ .reg = reg }, .{ .none = {} }, .{ .none = {} } };
@@ -272,10 +270,16 @@ const DecodeIterator = struct {
                 const addr8 = byte1;
                 const addr16 = (@as(u16, byte2) << 8) | addr8;
 
-                const mem_ops: [3]Operand = if (w == 0)
-                    .{ .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } }, .{ .imm = .{ .imm8 = 0 } }, none }
+                const mem_ops = if (w == 0)
+                    makeSrcDst(2, .{
+                        .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } },
+                        .{ .imm = .{ .imm8 = 0 } },
+                    })
                 else
-                    .{ .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } }, .{ .imm = .{ .imm8 = 0 } }, none };
+                    makeSrcDst(2, .{
+                        .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } },
+                        .{ .imm = .{ .imm8 = 0 } },
+                    });
 
                 var dst = &reg_ops;
                 var src = &mem_ops;
@@ -316,44 +320,42 @@ fn bitsToSrcDst(reg_or_mem: u3, mod: u2, imm_value: Operand) [3]Operand {
     i <<= 3;
     i |= reg_or_mem;
 
-    const SO = Operand;
-    const I = Immediate;
     const none = Operand{ .none = {} };
 
     // TODO: tame this beast
 
     return switch (i) {
         // mod == 0b00
-        0b00_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, none },
-        0b00_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, none },
-        0b00_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, none },
-        0b00_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, none },
+        0b00_000 => .{ .{ .reg = .bx }, .{ .reg = .si }, none },
+        0b00_001 => .{ .{ .reg = .bx }, .{ .reg = .di }, none },
+        0b00_010 => .{ .{ .reg = .bp }, .{ .reg = .si }, none },
+        0b00_011 => .{ .{ .reg = .bp }, .{ .reg = .di }, none },
         // these have an immediate zero in them so the printer prints them as effective
         // address calculations.
-        0b00_100 => .{ SO{ .reg = .si }, SO{ .imm = I{ .imm8 = 0 } }, none },
-        0b00_101 => .{ SO{ .reg = .di }, SO{ .imm = I{ .imm8 = 0 } }, none },
-        0b00_110 => .{ imm_value, SO{ .imm = I{ .imm8 = 0 } }, none },
-        0b00_111 => .{ SO{ .reg = .bx }, SO{ .imm = I{ .imm8 = 0 } }, none },
+        0b00_100 => .{ .{ .reg = .si }, .{ .imm = .{ .imm8 = 0 } }, none },
+        0b00_101 => .{ .{ .reg = .di }, .{ .imm = .{ .imm8 = 0 } }, none },
+        0b00_110 => .{ imm_value, .{ .imm = .{ .imm8 = 0 } }, none },
+        0b00_111 => .{ .{ .reg = .bx }, .{ .imm = .{ .imm8 = 0 } }, none },
 
         // mod == 0b01
-        0b01_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, imm_value },
-        0b01_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, imm_value },
-        0b01_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, imm_value },
-        0b01_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, imm_value },
-        0b01_100 => .{ SO{ .reg = .si }, imm_value, none },
-        0b01_101 => .{ SO{ .reg = .di }, imm_value, none },
-        0b01_110 => .{ SO{ .reg = .bp }, imm_value, none },
-        0b01_111 => .{ SO{ .reg = .bx }, imm_value, none },
+        0b01_000 => .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value },
+        0b01_001 => .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value },
+        0b01_010 => .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value },
+        0b01_011 => .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value },
+        0b01_100 => .{ .{ .reg = .si }, imm_value, none },
+        0b01_101 => .{ .{ .reg = .di }, imm_value, none },
+        0b01_110 => .{ .{ .reg = .bp }, imm_value, none },
+        0b01_111 => .{ .{ .reg = .bx }, imm_value, none },
 
         // mod == 0b10
-        0b10_000 => .{ SO{ .reg = .bx }, SO{ .reg = .si }, imm_value },
-        0b10_001 => .{ SO{ .reg = .bx }, SO{ .reg = .di }, imm_value },
-        0b10_010 => .{ SO{ .reg = .bp }, SO{ .reg = .si }, imm_value },
-        0b10_011 => .{ SO{ .reg = .bp }, SO{ .reg = .di }, imm_value },
-        0b10_100 => .{ SO{ .reg = .si }, imm_value, none },
-        0b10_101 => .{ SO{ .reg = .di }, imm_value, none },
-        0b10_110 => .{ SO{ .reg = .bp }, imm_value, none },
-        0b10_111 => .{ SO{ .reg = .bx }, imm_value, none },
+        0b10_000 => .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value },
+        0b10_001 => .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value },
+        0b10_010 => .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value },
+        0b10_011 => .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value },
+        0b10_100 => .{ .{ .reg = .si }, imm_value, none },
+        0b10_101 => .{ .{ .reg = .di }, imm_value, none },
+        0b10_110 => .{ .{ .reg = .bp }, imm_value, none },
+        0b10_111 => .{ .{ .reg = .bx }, imm_value, none },
 
         else => unreachable,
     };
