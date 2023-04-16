@@ -60,6 +60,15 @@ const Instruction = struct {
     binary_index: usize,
 };
 
+fn makeSrcDst(comptime num: u8, inits: [num]Operand) [3]Operand {
+    const none = Operand{ .none = {} };
+    var result: [3]Operand = .{ none, none, none };
+    inline for (0..num) |i| {
+        result[i] = inits[i];
+    }
+    return result;
+}
+
 /// Iterate through a byte buffer and produce `Instruction`s.
 const DecodeIterator = struct {
     bytes: []const u8,
@@ -79,133 +88,76 @@ const DecodeIterator = struct {
 
         const byte0 = self.bytes[self.index];
         switch (byte0) {
-            // reg/mem to/from reg
-            // 100010dw
-            0b10001000...0b10001011 => {
-                const d = @truncate(u1, byte0 >> 1);
+            // reg/mem to/from reg and imm to reg/mem. Both cases have similar formats so
+            // they are combined in this branch.
+            //
+            // [ byte0 ] [ mod/reg/rm ] [ disp lo ] [ disp hi ] ([ data lo ] [ data hi ])
+            0b10001000...0b10001011, // reg/mem to/from reg, 100010dw
+            0b11000110...0b11000111, // imm to reg/mem, 1100011w
+            => {
+                // if true, there is an immediate value on the end ([ data lo ] [ data hi])
+                const has_immediate = byte0 & 0b11111110 == 0b11000110;
+                const d = @truncate(u1, byte0 >> 1); // unused in the imm to reg/mem case
                 const w = @truncate(u1, byte0);
 
+                // [ mod/reg/rm ]
                 const byte1 = self.bytes[self.index + 1];
-
                 const mod = @truncate(u2, byte1 >> 6);
-                const reg_bits = @truncate(u3, byte1 >> 3);
+                const reg = @truncate(u3, byte1 >> 3);
                 const rm = @truncate(u3, byte1);
 
                 // all cases read at least 2 bytes
                 defer self.index += 2;
 
                 if (mod == 0b11) {
-                    // simpler reg to reg case
+                    // simpler reg to reg case. we assume that this never happens for imm
+                    // to reg, since that should be encoded differently as byte0 = [ 1011wreg ],
+                    // handled in a different switch branch.
+                    std.debug.assert(!has_immediate);
 
-                    const dst = if (d == 1) bitsToReg(reg_bits, w) else bitsToReg(rm, w);
-                    const src = if (d == 1) bitsToReg(rm, w) else bitsToReg(reg_bits, w);
+                    const dst = if (d == 1) bitsToReg(reg, w) else bitsToReg(rm, w);
+                    const src = if (d == 1) bitsToReg(rm, w) else bitsToReg(reg, w);
 
                     const dst_op = Operand{ .reg = dst };
                     const src_op = Operand{ .reg = src };
-                    const none = Operand{ .none = {} };
 
                     return Instruction{
                         .mnemonic = .mov,
-                        .destination = .{ dst_op, none, none },
-                        .source = .{ src_op, none, none },
+                        .destination = makeSrcDst(1, .{dst_op}),
+                        .source = makeSrcDst(1, .{src_op}),
                         .encoded_bytes = 2,
                         .binary_index = self.index,
                     };
                 }
 
-                // now we're in the rem/mem to reg/mem w/ displacement case
+                // now we're in the rem/mem/imm to reg/mem w/ possible displacement case
 
-                const none = Operand{ .none = {} };
-                const reg: [3]Operand = .{ Operand{ .reg = bitsToReg(reg_bits, w) }, none, none };
-                const imm_value = blk: {
-                    if (mod == 0b00 and rm != 0b110) {
-                        // instruction is two bytes long w/ no displacement, no action
-                        // needed here.
-                        break :blk none;
-                    } else if (mod == 0b01) {
-                        // byte displacement. these are treated as signed integers and
-                        // are sign extended (handled implicitly) to an i16 for computation.
-                        const byte2 = self.bytes[self.index + 2];
-                        break :blk Operand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
-                    } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
-                        // word displacement or the special 0b11 case:
-                        // a direct address mov with a two byte operand
-                        const byte2 = self.bytes[self.index + 2];
-                        const byte3 = self.bytes[self.index + 3];
-                        break :blk Operand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
-                    } else {
-                        unreachable;
-                    }
-                };
+                // assume that the location described in [mod/reg/rm] is the destination
+                // for now. if the d bit is set, we will swap them at the very end.
 
-                const additional_size: u8 = switch (imm_value) {
-                    .none => 0,
-                    .imm => |i| switch (i) {
-                        .imm8 => 1,
-                        .imm16 => 2,
-                    },
-                    else => unreachable,
-                };
-                defer self.index += additional_size;
-
-                const formula = bitsToSum(rm, mod, imm_value);
-
-                var dst = &formula;
-                var src = &reg;
-
-                if (d == 1) std.mem.swap(*const [3]Operand, &dst, &src);
-
-                return Instruction{
-                    .mnemonic = .mov,
-                    .destination = dst.*,
-                    .source = src.*,
-                    .encoded_bytes = 2 + additional_size,
-                    .binary_index = self.index,
-                };
-            },
-
-            // imm to reg/mem
-            // 1100011w
-            0b11000110...0b11000111 => {
-                const w = @truncate(u1, byte0);
-
-                const byte1 = self.bytes[self.index + 1];
-                const mod = @truncate(u2, byte1 >> 6);
-                const rm = @truncate(u3, byte1);
-
-                std.debug.assert(mod != 0b11);
-                if (mod == 0b11) {
-                    // not sure if this case actually happens
-                    std.debug.print("Somehow found an immediate to register instruction encoded the long way? Panic!\n", .{});
-                    unreachable;
-                }
-
-                // all encodings use the first two bytes
-                defer self.index += 2;
-
+                // get the displacement, if applicable
                 const displacement = blk: {
-                    const none = Operand{ .none = {} };
                     if (mod == 0b00 and rm != 0b110) {
                         // instruction is two bytes long w/ no displacement, no action
                         // needed here.
-                        break :blk none;
+                        break :blk Operand{ .none = {} };
                     } else if (mod == 0b01) {
                         // byte displacement. these are treated as signed integers and
                         // are sign extended (handled implicitly) to an i16 for computation.
                         const byte2 = self.bytes[self.index + 2];
-                        break :blk Operand{ .imm = Immediate{ .imm8 = @bitCast(i8, byte2) } };
+                        break :blk Operand{ .imm = .{ .imm8 = @bitCast(i8, byte2) } };
                     } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
                         // word displacement or the special 0b11 case:
                         // a direct address mov with a two byte operand
                         const byte2 = self.bytes[self.index + 2];
                         const byte3 = self.bytes[self.index + 3];
-                        break :blk Operand{ .imm = Immediate{ .imm16 = byte2 | (@as(i16, byte3) << 8) } };
+                        break :blk Operand{ .imm = .{ .imm16 = (@as(i16, byte3) << 8) | byte2 } };
                     } else {
                         unreachable;
                     }
                 };
 
-                const disp_width: u8 = switch (displacement) {
+                const displacement_size: u8 = switch (displacement) {
                     .none => 0,
                     .imm => |i| switch (i) {
                         .imm8 => 1,
@@ -213,31 +165,50 @@ const DecodeIterator = struct {
                     },
                     else => unreachable,
                 };
-                defer self.index += disp_width;
+                defer self.index += displacement_size;
 
-                const dst = bitsToSum(rm, mod, displacement);
+                // now we can finally get the destination from [mod/reg/rm] and [displo]/disphi]
+                const dst = bitsToSrcDst(rm, mod, displacement);
 
-                // get immediate
-                const immediate = blk: {
-                    var byte_low: u8 = self.bytes[self.index + 2 + disp_width];
-                    var byte_high: u8 = if (w == 1) self.bytes[self.index + 2 + disp_width + 1] else undefined;
+                // now get the source. again, for now, we assume that the source is the
+                // reg in [mod/reg/rm] or the immediate in the case of has_immediate. we
+                // will check the d bit and swap at necessary at the end.
 
-                    if (w == 0) {
-                        break :blk Operand{ .imm = .{ .imm8 = @bitCast(i8, byte_low) } };
+                const src_op = blk: {
+                    if (has_immediate) {
+                        var byte_low: u8 = self.bytes[self.index + 2 + displacement_size];
+                        var byte_high: u8 = if (w == 1) self.bytes[self.index + 2 + displacement_size + 1] else undefined;
+
+                        break :blk if (w == 0)
+                            Operand{ .imm = .{ .imm8 = @bitCast(i8, byte_low) } }
+                        else
+                            Operand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
                     } else {
-                        break :blk Operand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
+                        break :blk Operand{ .reg = bitsToReg(reg, w) };
                     }
                 };
-                defer self.index += @as(u8, 1) + w;
 
-                const none = Operand{ .none = {} };
-                const src: [3]Operand = .{ immediate, none, none };
+                const src_size: u8 = switch (src_op) {
+                    .imm => @as(u8, 1) + w,
+                    .reg => 0,
+                    else => unreachable,
+                };
+                defer self.index += src_size;
+
+                const src = makeSrcDst(1, .{src_op});
+
+                // swap src and dst if the d bit is not set. in imm to reg/mem, the d bit is
+                // always 1.
+                var src_ptr = &src;
+                var dst_ptr = &dst;
+
+                if (d == 1 and !has_immediate) std.mem.swap(*const [3]Operand, &src_ptr, &dst_ptr);
 
                 return Instruction{
                     .mnemonic = .mov,
-                    .destination = dst,
-                    .source = src,
-                    .encoded_bytes = @as(u8, 2) + disp_width + 1 + w,
+                    .destination = dst_ptr.*,
+                    .source = src_ptr.*,
+                    .encoded_bytes = 2 + displacement_size + if (has_immediate) @as(u8, 1) + w else 0,
                     .binary_index = self.index,
                 };
             },
@@ -327,7 +298,7 @@ const DecodeIterator = struct {
     }
 };
 
-fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: Operand) [3]Operand {
+fn bitsToSrcDst(reg_or_mem: u3, mod: u2, imm_value: Operand) [3]Operand {
     // mod == 0b11 is a reg to reg move and has no displacement calculation
     std.debug.assert(mod != 0b11);
 
@@ -380,8 +351,10 @@ fn bitsToSum(reg_or_mem: u3, mod: u2, imm_value: Operand) [3]Operand {
     };
 }
 
-// TODO rename. this is used as a general purpose lhs/rhs printing function now.
-fn writeDisplacement(ops: [3]Operand, writer: anytype) !void {
+/// Interpret `ops` as the source/destination operands of some instruction. Compose the
+/// operands into a single string that is appropriate for the source/destination of some
+/// instruction and write the string to `writer`.
+fn writeInstSrcDst(ops: [3]Operand, writer: anytype) !void {
     const num_ops = blk: {
         var i: usize = 0;
         for (ops) |op| {
@@ -424,6 +397,8 @@ fn writeDisplacement(ops: [3]Operand, writer: anytype) !void {
     }
 }
 
+/// Given `filename`, interpret it as 8086 machine code and write the corresponding 8086
+/// assembly to `writer`.
 pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
@@ -458,9 +433,9 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
 
         // instruction
         try writer.print("\n{s} ", .{@tagName(inst.mnemonic)});
-        try writeDisplacement(inst.destination, writer);
+        try writeInstSrcDst(inst.destination, writer);
         try writer.print(", ", .{});
-        try writeDisplacement(inst.source, writer);
+        try writeInstSrcDst(inst.source, writer);
         try writer.print("\n\n", .{});
     }
 }
