@@ -520,7 +520,9 @@ fn numOps(ops: [3]Operand) usize {
 /// Interpret `ops` as the source/destination operands of some instruction. Compose the
 /// operands into a single string that is appropriate for the source/destination of some
 /// instruction and write the string to `writer`.
-fn writeInstSrcDst(ops: [3]Operand, writer: anytype) !void {
+///
+/// TODO refactor this
+fn writeInstSrcDst(inst: Instruction, ops: [3]Operand, labels: std.AutoHashMap(usize, usize), writer: anytype) !void {
     if (numOps(ops) == 1) {
         switch (ops[0]) {
             .none => {},
@@ -529,12 +531,10 @@ fn writeInstSrcDst(ops: [3]Operand, writer: anytype) !void {
                 switch (iv) {
                     .imm8 => try writer.print("byte {}", .{iv.imm8}),
                     .imm16 => try writer.print("word {}", .{iv.imm16}),
-                    // assuming we are printing the arugment of a jump instruction. nasm
-                    // accepts jump address literals as constants with a $. jump address
-                    // instructions are relative to the next instruction, and all jump
-                    // instructions are 2 bytes long. putting the + in front of each
-                    // number satisfies nasm
-                    .inst_addr => try writer.print("$+2+{}", .{iv.inst_addr}),
+                    .inst_addr => |rel_addr| {
+                        const abs_addr = @intCast(usize, @intCast(i64, inst.binary_index) + rel_addr + 2);
+                        try writer.print("L{?}", .{labels.get(abs_addr)});
+                    },
                 }
             },
         }
@@ -587,19 +587,42 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         try instructions.append(inst);
     }
 
+    var labels = std.AutoHashMap(usize, usize).init(alctr);
+    defer labels.deinit();
+    var next_label_num: usize = 1;
+
+    // first pass: derive labels for jump instructions
+    for (instructions.items) |inst| {
+        if (std.meta.activeTag(inst.destination[0]) == .imm and std.meta.activeTag(inst.destination[0].imm) == .inst_addr) {
+            const rel_addr = inst.destination[0].imm.inst_addr;
+            const abs_addr = @intCast(usize, @intCast(i64, inst.binary_index) + rel_addr + 2);
+            if (!labels.contains(abs_addr)) {
+                try labels.put(abs_addr, next_label_num);
+                next_label_num += 1;
+            }
+        }
+    }
+
+    // second pass: do the actual printing
     for (instructions.items) |inst| {
         // binary comment
         try writer.print("; 0x{X}", .{inst.binary_index});
         for (0..inst.encoded_bytes) |i| {
             try writer.print(" {b:0>8}", .{asm_bin[inst.binary_index + i]});
         }
+        try writer.print("\n", .{});
+
+        // label, if applicable
+        if (labels.contains(inst.binary_index)) {
+            try writer.print("L{?}:\n", .{labels.get(inst.binary_index)});
+        }
 
         // instruction
-        try writer.print("\n{s} ", .{@tagName(inst.mnemonic)});
-        try writeInstSrcDst(inst.destination, writer);
+        try writer.print("{s} ", .{@tagName(inst.mnemonic)});
+        try writeInstSrcDst(inst, inst.destination, labels, writer);
         if (numOps(inst.source) > 0) {
             try writer.print(", ", .{});
-            try writeInstSrcDst(inst.source, writer);
+            try writeInstSrcDst(inst, inst.source, labels, writer);
         }
         try writer.print("\n\n", .{});
     }
