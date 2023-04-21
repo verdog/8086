@@ -65,6 +65,8 @@ const Mnemonic = enum {
     pushf,
     popf,
 
+    xchg,
+
     unknown,
 
     pub fn init(byte: u8) Mnemonic {
@@ -135,6 +137,10 @@ const Mnemonic = enum {
 
             0b10011100 => return .pushf,
             0b10011101 => return .popf,
+
+            0b10000110...0b10000111,
+            0b10010000...0b10010111,
+            => return .xchg,
 
             else => return .unknown,
         };
@@ -352,12 +358,14 @@ const DecodeIterator = struct {
         const byte0 = self.bytes[self.index];
 
         switch (byte0) {
+            // instructions that fit the initFrom6Arith pattern
             0b10001000...0b10001011, // mov reg/mem to/from reg, 100010dw
             0b11000110...0b11000111, // mov imm to reg/mem, 1100011w
             0b00000000...0b00000011, // add reg/mem with reg to reg/mem, 000000dw
             0b00101000...0b00101011, // sub reg/mem from reg to reg/mem, 001010dw
             0b00111000...0b00111011, // cmp reg/mem with reg, 0011100dw
             0b10000000...0b10000011, // arith* imm to reg/mem (*add, sub, cmp, etc...)
+            0b10000110...0b10000111, // xchg reg/mem with reg
             => {
                 const end = @min(self.bytes.len, self.index + 6);
                 const i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
@@ -468,6 +476,19 @@ const DecodeIterator = struct {
                     .destination = dst.*,
                     .source = src.*,
                     .encoded_bytes = @as(u8, 2) + w,
+                    .binary_index = self.index,
+                };
+            },
+
+            // xchg reg with ax 0b10010reg
+            0b10010000...0b10010111 => {
+                defer self.index += 1;
+                const reg = bitsToReg(@truncate(u3, byte0), 1);
+                return Instruction{
+                    .mnemonic = .xchg,
+                    .destination = makeSrcDst(1, .{.{ .reg = .ax }}),
+                    .source = makeSrcDst(1, .{.{ .reg = reg }}),
+                    .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
             },
@@ -855,6 +876,11 @@ test "e2e 0041" {
 test "e2e push pop" {
     const alctr = std.testing.allocator;
     try e2eTest("push_pop", alctr);
+}
+
+test "e2e xchg" {
+    const alctr = std.testing.allocator;
+    try e2eTest("xchg", alctr);
 }
 
 // test "e2e 0042" {
