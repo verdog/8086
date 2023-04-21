@@ -75,6 +75,8 @@ const Mnemonic = enum {
     lea,
     lds,
     les,
+    lahf,
+    sahf,
 
     unknown,
 
@@ -160,6 +162,11 @@ const Mnemonic = enum {
             => return .out,
 
             0b11010111 => return .xlat,
+            0b10001101 => return .lea,
+            0b11000101 => return .lds,
+            0b11000100 => return .les,
+            0b10011111 => return .lahf,
+            0b10011110 => return .sahf,
 
             else => return .unknown,
         };
@@ -238,13 +245,17 @@ const Instruction = struct {
             const byte0 = bytes[0];
             // TODO make this check less cryptic. it's checking for a mov imm opcode or an
             // arithmetic imm opcode.
-            // TODO two flags?? getting dangerous. untangle all this mess once the tests
+            // TODO three flags?? getting dangerous. untangle all this mess once the tests
             // pass.
             const has_immediate_mov = byte0 & 0b11111110 == 0b11000110;
             const has_immediate_math = byte0 & 0b11111100 == 0b10000000;
+            const is_load_effective =
+                Mnemonic.init(bytes[0]) == .lea or
+                Mnemonic.init(bytes[0]) == .lds or
+                Mnemonic.init(bytes[0]) == .les;
 
             const d = @truncate(u1, byte0 >> 1);
-            const w = @truncate(u1, byte0);
+            const w = @truncate(u1, byte0) | @boolToInt(is_load_effective);
 
             // [ mod/reg/rm ]
             const byte1 = bytes[1];
@@ -335,7 +346,9 @@ const Instruction = struct {
             src_ptr = &src;
             dst_ptr = &dst;
 
-            if (d == 1 and !(has_immediate_mov or has_immediate_math)) std.mem.swap(*const [3]Operand, &src_ptr, &dst_ptr);
+            const swap = (d == 1 and !(has_immediate_mov or has_immediate_math)) or
+                is_load_effective == true;
+            if (swap) std.mem.swap(*const [3]Operand, &src_ptr, &dst_ptr);
         }
 
         return Instruction{
@@ -385,6 +398,9 @@ const DecodeIterator = struct {
             0b00111000...0b00111011, // cmp reg/mem with reg, 0011100dw
             0b10000000...0b10000011, // arith* imm to reg/mem (*add, sub, cmp, etc...)
             0b10000110...0b10000111, // xchg reg/mem with reg
+            0b10001101, // lea
+            0b11000101, // lds
+            0b11000100, // les
             => {
                 const end = @min(self.bytes.len, self.index + 6);
                 const i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
@@ -615,6 +631,8 @@ const DecodeIterator = struct {
             0b10011100, // pushf
             0b10011101, // popf
             0b11010111, // xlat
+            0b10011111, // lahf
+            0b10011110, // sahf
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -946,6 +964,11 @@ test "e2e xchg" {
 test "e2e in out" {
     const alctr = std.testing.allocator;
     try e2eTest("in_out", alctr);
+}
+
+test "e2e loads" {
+    const alctr = std.testing.allocator;
+    try e2eTest("loads", alctr);
 }
 
 // test "e2e 0042" {
