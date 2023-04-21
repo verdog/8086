@@ -3,12 +3,13 @@
 /// 8086 register names. the order of the values in this enum has been chosen to match
 /// table 4-9 in the 8086 users manual (page 263). the reg field is combined with the w
 /// bit to make a number that maps to an enum value. see bitsToReg.
-const Register = enum(u4) {
+const Register = enum(u8) {
     // zig fmt: off
     al, cl, dl, bl, // a, b, c, d low. (byte)
     ah, ch, dh, bh, // a, b, c, d high. (byte)
     ax, cx, dx, bx, // a, b, c, d wide. (word, aka two bytes)
     sp, bp, si, di, // stack pointer, base pointer, source and destination. (word)
+    es, cs, ss, ds, // segment registers
     // zig fmt: on
 };
 
@@ -33,9 +34,11 @@ const Operand = union(enum) {
 /// logic uses @tagName to get the strings at print time.
 const Mnemonic = enum {
     mov,
+
     add,
     sub,
     cmp,
+
     je,
     jl,
     jle,
@@ -56,6 +59,12 @@ const Mnemonic = enum {
     loopz,
     loopnz,
     jcxz,
+
+    push,
+    pop,
+    pushf,
+    popf,
+
     unknown,
 
     pub fn init(byte: u8) Mnemonic {
@@ -100,6 +109,33 @@ const Mnemonic = enum {
             0b11100000 => return .loopnz,
             0b11100011 => return .jcxz,
 
+            0b11111111,
+            0b01010000...0b01010111,
+            0b000000110,
+            0b000001110,
+            0b000010110,
+            0b000011110,
+            0b000100110,
+            0b000101110,
+            0b000110110,
+            0b000111110,
+            => return .push,
+
+            0b10001111,
+            0b01011000...0b01011111,
+            0b000000111,
+            0b000001111,
+            0b000010111,
+            0b000011111,
+            0b000100111,
+            0b000101111,
+            0b000110111,
+            0b000111111,
+            => return .pop,
+
+            0b10011100 => return .pushf,
+            0b10011101 => return .popf,
+
             else => return .unknown,
         };
     }
@@ -131,6 +167,11 @@ fn bitsToReg(reg: u3, w: u1) Register {
     i <<= 3;
     i |= reg;
     return @intToEnum(Register, i);
+}
+
+/// Convert reg bits to segment register
+fn bitsToSegReg(reg: u2) Register {
+    return @intToEnum(Register, @enumToInt(Register.es) + reg);
 }
 
 /// The main instruction struct. Each instruction is decoded into an instance of this.
@@ -324,6 +365,16 @@ const DecodeIterator = struct {
                 return i;
             },
 
+            0b10001111, // push reg/mem
+            0b11111111, // pop reg/mem
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
+                i.destination = makeSrcDst(0, .{});
+                defer self.index += i.encoded_bytes;
+                return i;
+            },
+
             // mov imm to reg
             // 1011wreg
             0b10110000...0b10111111 => {
@@ -443,14 +494,63 @@ const DecodeIterator = struct {
                 };
             },
 
+            // push/pop register
+            0b01010000...0b01011111 => {
+                // w is implicitly 1
+                const reg = bitsToReg(@truncate(u3, byte0), 1);
+
+                defer self.index += 1;
+                return Instruction{
+                    .mnemonic = Mnemonic.init(byte0),
+                    .destination = makeSrcDst(1, .{.{ .reg = reg }}),
+                    .source = makeSrcDst(0, .{}),
+                    .encoded_bytes = 1,
+                    .binary_index = self.index,
+                };
+            },
+
+            // push segment register
+            0b00000110,
+            0b00001110,
+            0b00010110,
+            0b00011110,
+            // pop segment register
+            0b00000111,
+            0b00001111,
+            0b00010111,
+            0b00011111,
+            => {
+                defer self.index += 1;
+                const reg = bitsToSegReg(@truncate(u2, byte0 >> 3));
+                return Instruction{
+                    .mnemonic = Mnemonic.init(byte0),
+                    .destination = makeSrcDst(1, .{.{ .reg = reg }}),
+                    .source = makeSrcDst(0, .{}),
+                    .encoded_bytes = 1,
+                    .binary_index = self.index,
+                };
+            },
+
+            // single byte instructions
+            0b10011100, // pushf
+            0b10011101, // popf
+            => {
+                defer self.index += 1;
+                return Instruction{
+                    .mnemonic = Mnemonic.init(byte0),
+                    .destination = makeSrcDst(0, .{}),
+                    .source = makeSrcDst(0, .{}),
+                    .encoded_bytes = 1,
+                    .binary_index = self.index,
+                };
+            },
+
             else => {
                 defer self.index += 1;
-                const none = Operand{ .none = {} };
-
                 return Instruction{
                     .mnemonic = .unknown,
-                    .destination = .{ none, none, none },
-                    .source = .{ none, none, none },
+                    .destination = makeSrcDst(0, .{}),
+                    .source = makeSrcDst(0, .{}),
                     .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
@@ -539,6 +639,12 @@ fn writeInstSrcDst(inst: Instruction, ops: [3]Operand, labels: std.AutoHashMap(u
             },
         }
     } else {
+        if (inst.mnemonic == .push or inst.mnemonic == .pop) {
+            // not sure if this is necessarily real-world accurate, but it covers all the
+            // test cases given. always print "word" in fron of pushes/pops with
+            // displacements
+            try writer.print("word ", .{});
+        }
         try writer.print("[", .{});
         for (ops, 0..) |op, i| {
             switch (op) {
@@ -619,11 +725,14 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
 
         // instruction
         try writer.print("{s} ", .{@tagName(inst.mnemonic)});
-        try writeInstSrcDst(inst, inst.destination, labels, writer);
-        if (numOps(inst.source) > 0) {
+        const has_dest = numOps(inst.destination) > 0;
+        const has_src = numOps(inst.source) > 0;
+        if (has_dest)
+            try writeInstSrcDst(inst, inst.destination, labels, writer);
+        if (has_dest and has_src)
             try writer.print(", ", .{});
+        if (has_src)
             try writeInstSrcDst(inst, inst.source, labels, writer);
-        }
         try writer.print("\n\n", .{});
     }
 }
@@ -741,6 +850,11 @@ test "e2e negative displacement" {
 test "e2e 0041" {
     const alctr = std.testing.allocator;
     try e2eTest("listing_0041_add_sub_cmp_jnz", alctr);
+}
+
+test "e2e push pop" {
+    const alctr = std.testing.allocator;
+    try e2eTest("push_pop", alctr);
 }
 
 // test "e2e 0042" {
