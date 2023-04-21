@@ -67,6 +67,15 @@ const Mnemonic = enum {
 
     xchg,
 
+    in,
+    out,
+
+    xlat,
+
+    lea,
+    lds,
+    les,
+
     unknown,
 
     pub fn init(byte: u8) Mnemonic {
@@ -141,6 +150,16 @@ const Mnemonic = enum {
             0b10000110...0b10000111,
             0b10010000...0b10010111,
             => return .xchg,
+
+            0b11100100...0b11100101,
+            0b11101100...0b11101101,
+            => return .in,
+
+            0b11100110...0b11100111,
+            0b11101110...0b11101111,
+            => return .out,
+
+            0b11010111 => return .xlat,
 
             else => return .unknown,
         };
@@ -515,6 +534,46 @@ const DecodeIterator = struct {
                 };
             },
 
+            // in/out
+            0b11100100...0b11100101,
+            0b11101100...0b11101101,
+            0b11100110...0b11100111,
+            0b11101110...0b11101111,
+            => {
+                // for these specific opcodes, the 4th lsb happens to be 0 when an extra
+                // byte of data is present.
+                const has_data = (byte0 & 0b0001000) == 0;
+                const w = @truncate(u1, byte0);
+                defer self.index += @as(u8, 1) + @boolToInt(has_data);
+
+                const dest = if (w == 1)
+                    makeSrcDst(1, .{.{ .reg = .ax }})
+                else
+                    makeSrcDst(1, .{.{ .reg = .al }});
+
+                const src = blk: {
+                    if (has_data) {
+                        const byte1 = @bitCast(i8, self.bytes[self.index + 1]);
+                        break :blk makeSrcDst(1, .{.{ .imm = .{ .imm8 = byte1 } }});
+                    } else {
+                        break :blk makeSrcDst(1, .{.{ .reg = .dx }});
+                    }
+                };
+
+                const mn = Mnemonic.init(byte0);
+                var src_ptr = &src;
+                var dst_ptr = &dest;
+                if (mn == .out) std.mem.swap(*const [3]Operand, &src_ptr, &dst_ptr);
+
+                return Instruction{
+                    .mnemonic = mn,
+                    .destination = dst_ptr.*,
+                    .source = src_ptr.*,
+                    .encoded_bytes = @as(u8, 1) + @boolToInt(has_data),
+                    .binary_index = self.index,
+                };
+            },
+
             // push/pop register
             0b01010000...0b01011111 => {
                 // w is implicitly 1
@@ -552,9 +611,10 @@ const DecodeIterator = struct {
                 };
             },
 
-            // single byte instructions
+            // single byte no operand instructions
             0b10011100, // pushf
             0b10011101, // popf
+            0b11010111, // xlat
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -881,6 +941,11 @@ test "e2e push pop" {
 test "e2e xchg" {
     const alctr = std.testing.allocator;
     try e2eTest("xchg", alctr);
+}
+
+test "e2e in out" {
+    const alctr = std.testing.allocator;
+    try e2eTest("in_out", alctr);
 }
 
 // test "e2e 0042" {
