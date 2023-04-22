@@ -17,7 +17,7 @@ const Register = enum(u8) {
 const Immediate = union(enum) {
     imm8: i8,
     inst_addr: i8, // instruction address. displayed differently.
-    imm16: i16,
+    imm16: i16, // TODO now that size is encoded in the Instruction, maybe all immediates can be imm16
 };
 
 /// An instruction operand. In practice, instructions can involve 3 operands for a single
@@ -235,6 +235,8 @@ const SrcDst = struct {
     const Size = enum {
         byte,
         word,
+        // some instructions are only accepted by nasm if you *don't* specify a memory size
+        unspecified,
     };
 
     pub fn init(comptime num: u8, inits: [num]Operand, size: Size) SrcDst {
@@ -392,7 +394,7 @@ const Instruction = struct {
             };
             defer parsed_len += src_size;
 
-            const src = SrcDst.init(1, .{src_op}, .byte);
+            const src = SrcDst.init(1, .{src_op}, if (w == 0) .byte else .word);
 
             // swap src and dst if the d bit is not set. watch out, in imm to reg/mem,
             // the d bit is always 1.
@@ -448,8 +450,13 @@ const DecodeIterator = struct {
             0b11000100, // les
             => {
                 const end = @min(self.bytes.len, self.index + 6);
-                const i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
+                var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
                 defer self.index += i.encoded_bytes;
+                if (i.mnemonic == .lds or i.mnemonic == .les) {
+                    // nasm does *not* want you to specify the size of the memory address
+                    // for these instructions...
+                    i.source.size = .unspecified;
+                }
                 return i;
             },
 
@@ -477,8 +484,8 @@ const DecodeIterator = struct {
 
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
-                    .destination = SrcDst.init(1, .{reg}, .byte),
-                    .source = SrcDst.init(1, .{imm}, .byte),
+                    .destination = SrcDst.init(1, .{reg}, if (w == 0) .byte else .word),
+                    .source = SrcDst.init(1, .{imm}, if (w == 0) .byte else .word),
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
                 };
@@ -528,8 +535,8 @@ const DecodeIterator = struct {
 
                 return Instruction{
                     .mnemonic = .mov,
-                    .destination = SrcDst.init(1, .{reg_op}, .byte),
-                    .source = SrcDst.init(1, .{imm}, .byte),
+                    .destination = SrcDst.init(1, .{reg_op}, if (w == 0) .byte else .word),
+                    .source = SrcDst.init(1, .{imm}, if (w == 0) .byte else .word),
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
                 };
@@ -622,12 +629,12 @@ const DecodeIterator = struct {
                 const dest = if (w == 1)
                     SrcDst.init(1, .{.{ .reg = .ax }}, .word)
                 else
-                    SrcDst.init(1, .{.{ .reg = .al }}, .word);
+                    SrcDst.init(1, .{.{ .reg = .al }}, .byte);
 
                 const src = blk: {
                     if (has_data) {
                         const byte1 = @bitCast(i8, self.bytes[self.index + 1]);
-                        break :blk SrcDst.init(1, .{.{ .imm = .{ .imm8 = byte1 } }}, .word);
+                        break :blk SrcDst.init(1, .{.{ .imm = .{ .imm8 = byte1 } }}, .byte);
                     } else {
                         break :blk SrcDst.init(1, .{.{ .reg = .dx }}, .word);
                     }
@@ -709,42 +716,44 @@ fn bitsToSrcDst(reg_or_mem: u3, mod: u2, w: u1, imm_value: Operand) SrcDst {
     i <<= 3;
     i |= reg_or_mem;
 
+    const size: SrcDst.Size = if (w == 0) .byte else .word;
+
     // TODO: tame this beast
     return switch (i) {
         // mod == 0b00
-        0b00_000 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .reg = .si } }, .byte),
-        0b00_001 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .reg = .di } }, .byte),
-        0b00_010 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .si } }, .byte),
-        0b00_011 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .di } }, .byte),
+        0b00_000 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .reg = .si } }, size),
+        0b00_001 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .reg = .di } }, size),
+        0b00_010 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .si } }, size),
+        0b00_011 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .di } }, size),
         // these have an immediate zero in them so the printer prints them as effective
         // address calculations.
-        0b00_100 => SrcDst.init(2, .{ .{ .reg = .si }, .{ .imm = .{ .imm8 = 0 } } }, .byte),
-        0b00_101 => SrcDst.init(2, .{ .{ .reg = .di }, .{ .imm = .{ .imm8 = 0 } } }, .byte),
-        0b00_110 => SrcDst.init(2, .{ imm_value, .{ .imm = .{ .imm8 = 0 } } }, .byte),
-        0b00_111 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .imm = .{ .imm8 = 0 } } }, .byte),
+        0b00_100 => SrcDst.init(2, .{ .{ .reg = .si }, .{ .imm = .{ .imm8 = 0 } } }, size),
+        0b00_101 => SrcDst.init(2, .{ .{ .reg = .di }, .{ .imm = .{ .imm8 = 0 } } }, size),
+        0b00_110 => SrcDst.init(2, .{ imm_value, .{ .imm = .{ .imm8 = 0 } } }, size),
+        0b00_111 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .imm = .{ .imm8 = 0 } } }, size),
 
         // mod == 0b01
-        0b01_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, .byte),
-        0b01_001 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value }, .byte),
-        0b01_010 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value }, .byte),
-        0b01_011 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value }, .byte),
-        0b01_100 => SrcDst.init(2, .{ .{ .reg = .si }, imm_value }, .byte),
-        0b01_101 => SrcDst.init(2, .{ .{ .reg = .di }, imm_value }, .byte),
-        0b01_110 => SrcDst.init(2, .{ .{ .reg = .bp }, imm_value }, .byte),
-        0b01_111 => SrcDst.init(2, .{ .{ .reg = .bx }, imm_value }, .byte),
+        0b01_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, size),
+        0b01_001 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value }, size),
+        0b01_010 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value }, size),
+        0b01_011 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value }, size),
+        0b01_100 => SrcDst.init(2, .{ .{ .reg = .si }, imm_value }, size),
+        0b01_101 => SrcDst.init(2, .{ .{ .reg = .di }, imm_value }, size),
+        0b01_110 => SrcDst.init(2, .{ .{ .reg = .bp }, imm_value }, size),
+        0b01_111 => SrcDst.init(2, .{ .{ .reg = .bx }, imm_value }, size),
 
         // mod == 0b10
-        0b10_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, .byte),
-        0b10_001 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value }, .byte),
-        0b10_010 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value }, .byte),
-        0b10_011 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value }, .byte),
-        0b10_100 => SrcDst.init(2, .{ .{ .reg = .si }, imm_value }, .byte),
-        0b10_101 => SrcDst.init(2, .{ .{ .reg = .di }, imm_value }, .byte),
-        0b10_110 => SrcDst.init(2, .{ .{ .reg = .bp }, imm_value }, .byte),
-        0b10_111 => SrcDst.init(2, .{ .{ .reg = .bx }, imm_value }, .byte),
+        0b10_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, size),
+        0b10_001 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value }, size),
+        0b10_010 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value }, size),
+        0b10_011 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value }, size),
+        0b10_100 => SrcDst.init(2, .{ .{ .reg = .si }, imm_value }, size),
+        0b10_101 => SrcDst.init(2, .{ .{ .reg = .di }, imm_value }, size),
+        0b10_110 => SrcDst.init(2, .{ .{ .reg = .bp }, imm_value }, size),
+        0b10_111 => SrcDst.init(2, .{ .{ .reg = .bx }, imm_value }, size),
 
         // mod == 0b11. this case doesn't have any displacements so we just use bitsToReg
-        0b11_000...0b11_111 => SrcDst.init(1, .{.{ .reg = bitsToReg(reg_or_mem, w) }}, .byte),
+        0b11_000...0b11_111 => SrcDst.init(1, .{.{ .reg = bitsToReg(reg_or_mem, w) }}, size),
     };
 }
 
@@ -753,15 +762,40 @@ fn bitsToSrcDst(reg_or_mem: u3, mod: u2, w: u1, imm_value: Operand) SrcDst {
 /// instruction and write the string to `writer`.
 ///
 /// TODO refactor this
-fn writeInstSrcDst(inst: Instruction, ops: SrcDst, labels: std.AutoHashMap(usize, usize), writer: anytype) !void {
-    if (ops.numOps() == 1) {
-        switch (ops.op0.?) {
+fn writeInstSrcDst(inst: Instruction, srcdst: SrcDst, labels: std.AutoHashMap(usize, usize), writer: anytype) !void {
+    const is_single_reg_srcdst = srcdst.numOps() == 1 and
+        std.meta.activeTag(srcdst.op0.?) == .reg;
+    const is_inst_addr = srcdst.numOps() == 1 and
+        std.meta.activeTag(srcdst.op0.?) == .imm and
+        std.meta.activeTag(srcdst.op0.?.imm) == .inst_addr;
+
+    // TODO this can probably be simplified. seems like the only time we *should* print
+    // sizes is a single literal?
+    if (!is_single_reg_srcdst and !is_inst_addr and srcdst.size != .unspecified)
+        try writer.print("{s} ", .{@tagName(srcdst.size)});
+
+    if (srcdst.numOps() > 1)
+        try writer.print("[", .{});
+
+    const ops = [3]?Operand{ srcdst.op0, srcdst.op1, srcdst.op2 };
+
+    for (ops, 0..) |mop, i| {
+        if (mop == null) break;
+        const op = mop.?;
+        switch (op) {
             .none => {},
-            .reg => |r| try writer.print("{s}", .{@tagName(r)}),
-            .imm => |iv| {
-                switch (iv) {
-                    .imm8 => try writer.print("byte {}", .{iv.imm8}),
-                    .imm16 => try writer.print("word {}", .{iv.imm16}),
+            .reg => |r| {
+                if (i > 0) try writer.print("+", .{});
+                try writer.print("{s}", .{@tagName(r)});
+            },
+            .imm => |ival| {
+                switch (ival) {
+                    .imm8, .imm16 => {
+                        if (i > 0) try writer.print("+", .{});
+                        // TODO print in hex with dec in comment
+                        const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
+                        try writer.print("{}", .{pval});
+                    },
                     .inst_addr => |rel_addr| {
                         const abs_addr = @intCast(usize, @intCast(i64, inst.binary_index) + rel_addr + 2);
                         try writer.print("L{?}", .{labels.get(abs_addr)});
@@ -769,40 +803,10 @@ fn writeInstSrcDst(inst: Instruction, ops: SrcDst, labels: std.AutoHashMap(usize
                 }
             },
         }
-    } else {
-        if (inst.mnemonic == .push or inst.mnemonic == .pop) {
-            // not sure if this is necessarily real-world accurate, but it covers all the
-            // test cases given. always print "word" in fron of pushes/pops with
-            // displacements
-            try writer.print("word ", .{});
-        }
-        try writer.print("[", .{});
-
-        const pOp = struct {
-            fn pOp(op: Operand, i: usize, writr: anytype) !void {
-                switch (op) {
-                    .none => {},
-                    .reg => |r| {
-                        if (i > 0) try writr.print("+", .{});
-                        try writr.print("{s}", .{@tagName(r)});
-                    },
-                    .imm => |ival| {
-                        // TODO offset might be negative
-                        if (i > 0) try writr.print("+", .{});
-                        // TODO print in hex with dec in comment
-                        const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
-                        try writr.print("{}", .{pval});
-                    },
-                }
-            }
-        }.pOp;
-
-        if (ops.op0) |op0| try pOp(op0, 0, writer);
-        if (ops.op1) |op1| try pOp(op1, 1, writer);
-        if (ops.op2) |op2| try pOp(op2, 2, writer);
-
-        try writer.print("]", .{});
     }
+
+    if (srcdst.numOps() > 1)
+        try writer.print("]", .{});
 }
 
 /// Given `filename`, interpret it as 8086 machine code and write the corresponding 8086
