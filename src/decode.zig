@@ -36,8 +36,13 @@ const Mnemonic = enum {
     mov,
 
     add,
+    adc,
+    inc,
     sub,
     cmp,
+
+    aaa,
+    daa,
 
     je,
     jl,
@@ -93,6 +98,16 @@ const Mnemonic = enum {
             0b00000100...0b00000101, // add imm to ax
             => return .add,
 
+            0b00010000...0b00010011, // adc reg/mem with reg to reg/mem
+            0b00010100...0b00010101, // add imm to ax
+            => return .adc,
+
+            0b01000000...0b01000111, // inc register
+            => return .inc,
+
+            0b00110111 => return .aaa,
+            0b00100111 => return .daa,
+
             0b00101000...0b00101011, // sub reg/mem from reg to reg/mem
             0b00101100...0b00101101, // sub imm to ax
             => return .sub,
@@ -122,28 +137,23 @@ const Mnemonic = enum {
             0b11100000 => return .loopnz,
             0b11100011 => return .jcxz,
 
-            0b11111111,
             0b01010000...0b01010111,
-            0b000000110,
-            0b000001110,
-            0b000010110,
-            0b000011110,
-            0b000100110,
-            0b000101110,
-            0b000110110,
-            0b000111110,
+            0b00000110,
+            0b00001110,
+            0b00010110,
+            0b00011110,
+            0b00100110,
+            0b00101110,
+            0b00110110,
+            0b00111110,
             => return .push,
 
             0b10001111,
             0b01011000...0b01011111,
-            0b000000111,
-            0b000001111,
-            0b000010111,
-            0b000011111,
-            0b000100111,
-            0b000101111,
-            0b000110111,
-            0b000111111,
+            0b00000111,
+            0b00001111,
+            0b00010111,
+            0b00011111,
             => return .pop,
 
             0b10011100 => return .pushf,
@@ -180,10 +190,19 @@ const Mnemonic = enum {
             // add, sub, cmp, etc imm from reg/mem
             0b10000000...0b10000011 => switch (bytes[1] & 0b00111000) {
                 0b00000000 => .add,
+                0b00010000 => .adc,
                 0b00101000 => .sub,
                 0b00111000 => .cmp,
                 else => .unknown,
             },
+
+            // push, inc reg/mem
+            0b11111110...0b11111111 => switch (bytes[1] & 0b00111000) {
+                0b00000000 => .inc,
+                0b00110000 => .push,
+                else => .unknown,
+            },
+
             else => .unknown,
         };
     }
@@ -391,12 +410,13 @@ const DecodeIterator = struct {
 
         switch (byte0) {
             // instructions that fit the initFrom6Arith pattern
-            0b10001000...0b10001011, // mov reg/mem to/from reg, 100010dw
-            0b11000110...0b11000111, // mov imm to reg/mem, 1100011w
-            0b00000000...0b00000011, // add reg/mem with reg to reg/mem, 000000dw
-            0b00101000...0b00101011, // sub reg/mem from reg to reg/mem, 001010dw
-            0b00111000...0b00111011, // cmp reg/mem with reg, 0011100dw
-            0b10000000...0b10000011, // arith* imm to reg/mem (*add, sub, cmp, etc...)
+            0b10001000...0b10001011, // mov reg/mem to/from reg,
+            0b11000110...0b11000111, // mov imm to reg/mem,
+            0b00000000...0b00000011, // add reg/mem with reg to reg/mem,
+            0b00010000...0b00010011, // adc reg/mem with reg to reg/mem,
+            0b00101000...0b00101011, // sub reg/mem from reg to reg/mem,
+            0b00111000...0b00111011, // cmp reg/mem with reg,
+            0b10000000...0b10000011, // arith* imm to reg/mem (*add, adc, sub, cmp, etc...)
             0b10000110...0b10000111, // xchg reg/mem with reg
             0b10001101, // lea
             0b11000101, // lds
@@ -408,42 +428,9 @@ const DecodeIterator = struct {
                 return i;
             },
 
-            0b10001111, // push reg/mem
-            0b11111111, // pop reg/mem
-            => {
-                const end = @min(self.bytes.len, self.index + 6);
-                var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
-                i.destination = makeSrcDst(0, .{});
-                defer self.index += i.encoded_bytes;
-                return i;
-            },
-
-            // mov imm to reg
-            // 1011wreg
-            0b10110000...0b10111111 => {
-                const w = @truncate(u1, byte0 >> 3);
-                const reg_bits = @truncate(u3, byte0);
-                defer self.index += @as(u8, 2) + w;
-                const byte1 = self.bytes[starting_index + 1];
-                const imm = blk: {
-                    const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
-                    break :blk if (w == 0) Operand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } } else Operand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
-                };
-
-                const reg = bitsToReg(reg_bits, w);
-                const reg_op = Operand{ .reg = reg };
-
-                return Instruction{
-                    .mnemonic = .mov,
-                    .destination = makeSrcDst(1, .{reg_op}),
-                    .source = makeSrcDst(1, .{imm}),
-                    .encoded_bytes = @as(u8, 2) + w,
-                    .binary_index = self.index,
-                };
-            },
-
             // * imm with ax
             0b00000100...0b00000101, // *add
+            0b00010100...0b00010101, // *adc
             0b00101100...0b00101101, // *sub
             0b00111100...0b00111101, // *cmp
             => {
@@ -466,6 +453,57 @@ const DecodeIterator = struct {
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
                     .destination = makeSrcDst(1, .{reg}),
+                    .source = makeSrcDst(1, .{imm}),
+                    .encoded_bytes = @as(u8, 2) + w,
+                    .binary_index = self.index,
+                };
+            },
+
+            0b11111110...0b11111111, // push/inc reg/mem
+            0b10001111, // pop reg/mem
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
+                i.destination = makeSrcDst(0, .{});
+                defer self.index += i.encoded_bytes;
+                return i;
+            },
+
+            // push/pop/inc register oooooreg
+            0b01010000...0b01011111, // push/pop
+            0b01000000...0b01000111, // reg
+            => {
+                // w is implicitly 1
+                const reg = bitsToReg(@truncate(u3, byte0), 1);
+
+                defer self.index += 1;
+                return Instruction{
+                    .mnemonic = Mnemonic.init(byte0),
+                    .destination = makeSrcDst(1, .{.{ .reg = reg }}),
+                    .source = makeSrcDst(0, .{}),
+                    .encoded_bytes = 1,
+                    .binary_index = self.index,
+                };
+            },
+
+            // mov imm to reg
+            // 1011wreg
+            0b10110000...0b10111111 => {
+                const w = @truncate(u1, byte0 >> 3);
+                const reg_bits = @truncate(u3, byte0);
+                defer self.index += @as(u8, 2) + w;
+                const byte1 = self.bytes[starting_index + 1];
+                const imm = blk: {
+                    const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
+                    break :blk if (w == 0) Operand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } } else Operand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
+                };
+
+                const reg = bitsToReg(reg_bits, w);
+                const reg_op = Operand{ .reg = reg };
+
+                return Instruction{
+                    .mnemonic = .mov,
+                    .destination = makeSrcDst(1, .{reg_op}),
                     .source = makeSrcDst(1, .{imm}),
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
@@ -590,21 +628,6 @@ const DecodeIterator = struct {
                 };
             },
 
-            // push/pop register
-            0b01010000...0b01011111 => {
-                // w is implicitly 1
-                const reg = bitsToReg(@truncate(u3, byte0), 1);
-
-                defer self.index += 1;
-                return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
-                    .destination = makeSrcDst(1, .{.{ .reg = reg }}),
-                    .source = makeSrcDst(0, .{}),
-                    .encoded_bytes = 1,
-                    .binary_index = self.index,
-                };
-            },
-
             // push segment register
             0b00000110,
             0b00001110,
@@ -633,6 +656,8 @@ const DecodeIterator = struct {
             0b11010111, // xlat
             0b10011111, // lahf
             0b10011110, // sahf
+            0b00110111, // aaa
+            0b00100111, // daa
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -970,6 +995,11 @@ test "e2e loads" {
     const alctr = std.testing.allocator;
     try e2eTest("loads", alctr);
 }
+
+// test "e2e adds" {
+//     const alctr = std.testing.allocator;
+//     try e2eTest("adds", alctr);
+// }
 
 // test "e2e 0042" {
 //     const alctr = std.testing.allocator;
