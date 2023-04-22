@@ -225,14 +225,48 @@ fn bitsToSegReg(reg: u2) Register {
     return @intToEnum(Register, @enumToInt(Register.es) + reg);
 }
 
+/// Source or destination for an instruction.
+const SrcDst = struct {
+    op0: ?Operand,
+    op1: ?Operand,
+    op2: ?Operand,
+    size: Size,
+
+    const Size = enum {
+        byte,
+        word,
+    };
+
+    pub fn init(comptime num: u8, inits: [num]Operand, size: Size) SrcDst {
+        var result = SrcDst{
+            .op0 = null,
+            .op1 = null,
+            .op2 = null,
+            .size = size,
+        };
+        if (inits.len > 0) result.op0 = inits[0];
+        if (inits.len > 1) result.op1 = inits[1];
+        if (inits.len > 2) result.op2 = inits[2];
+        return result;
+    }
+
+    pub fn numOps(self: SrcDst) usize {
+        var i: usize = 0;
+        i += @boolToInt(self.op0 != null);
+        i += @boolToInt(self.op1 != null);
+        i += @boolToInt(self.op2 != null);
+        return i;
+    }
+};
+
 /// The main instruction struct. Each instruction is decoded into an instance of this.
 const Instruction = struct {
     mnemonic: Mnemonic,
     /// Destination operand(s). Some instructions only make use of 1 or 2 operands, in
     /// which case the decoder will fill the buffer with `Operand.none`.
-    destination: [3]Operand,
+    destination: SrcDst,
     /// Source operands(s). Uses the same `none` packing logic as `destination`.
-    source: [3]Operand,
+    source: SrcDst,
     /// Size of the operand in machine code.
     encoded_bytes: u8,
     binary_index: usize,
@@ -249,8 +283,8 @@ const Instruction = struct {
         std.debug.assert(bytes.len >= 2 and bytes.len <= 6);
 
         var parsed_len: u8 = 0;
-        var src_ptr: *const [3]Operand = undefined; // set in block below
-        var dst_ptr: *const [3]Operand = undefined; // set in block below
+        var src_ptr: *const SrcDst = undefined; // set in block below
+        var dst_ptr: *const SrcDst = undefined; // set in block below
 
         // TODO fix up the weird control flow of this function. we are probably abusing defer
         {
@@ -358,7 +392,7 @@ const Instruction = struct {
             };
             defer parsed_len += src_size;
 
-            const src = makeSrcDst(1, .{src_op});
+            const src = SrcDst.init(1, .{src_op}, .byte);
 
             // swap src and dst if the d bit is not set. watch out, in imm to reg/mem,
             // the d bit is always 1.
@@ -367,7 +401,7 @@ const Instruction = struct {
 
             const swap = (d == 1 and !(has_immediate_mov or has_immediate_math)) or
                 is_load_effective == true;
-            if (swap) std.mem.swap(*const [3]Operand, &src_ptr, &dst_ptr);
+            if (swap) std.mem.swap(*const SrcDst, &src_ptr, &dst_ptr);
         }
 
         return Instruction{
@@ -379,15 +413,6 @@ const Instruction = struct {
         };
     }
 };
-
-fn makeSrcDst(comptime num: u8, inits: [num]Operand) [3]Operand {
-    const none = Operand{ .none = {} };
-    var result: [3]Operand = .{ none, none, none };
-    inline for (0..num) |i| {
-        result[i] = inits[i];
-    }
-    return result;
-}
 
 /// Iterate through a byte buffer and produce `Instruction`s.
 const DecodeIterator = struct {
@@ -452,8 +477,8 @@ const DecodeIterator = struct {
 
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
-                    .destination = makeSrcDst(1, .{reg}),
-                    .source = makeSrcDst(1, .{imm}),
+                    .destination = SrcDst.init(1, .{reg}, .byte),
+                    .source = SrcDst.init(1, .{imm}, .byte),
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
                 };
@@ -464,7 +489,7 @@ const DecodeIterator = struct {
             => {
                 const end = @min(self.bytes.len, self.index + 6);
                 var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
-                i.destination = makeSrcDst(0, .{});
+                i.destination = SrcDst.init(0, .{}, .byte);
                 defer self.index += i.encoded_bytes;
                 return i;
             },
@@ -479,8 +504,8 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
-                    .destination = makeSrcDst(1, .{.{ .reg = reg }}),
-                    .source = makeSrcDst(0, .{}),
+                    .destination = SrcDst.init(1, .{.{ .reg = reg }}, .byte),
+                    .source = SrcDst.init(0, .{}, .byte),
                     .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
@@ -503,8 +528,8 @@ const DecodeIterator = struct {
 
                 return Instruction{
                     .mnemonic = .mov,
-                    .destination = makeSrcDst(1, .{reg_op}),
-                    .source = makeSrcDst(1, .{imm}),
+                    .destination = SrcDst.init(1, .{reg_op}, .byte),
+                    .source = SrcDst.init(1, .{imm}, .byte),
                     .encoded_bytes = @as(u8, 2) + w,
                     .binary_index = self.index,
                 };
@@ -524,25 +549,19 @@ const DecodeIterator = struct {
                 const byte2 = self.bytes[self.index + 2];
 
                 const reg: Register = if (w == 0) .al else .ax;
-                const reg_ops: [3]Operand = .{ .{ .reg = reg }, .{ .none = {} }, .{ .none = {} } };
+                const reg_ops = SrcDst.init(1, .{.{ .reg = reg }}, .byte);
 
                 const addr8 = byte1;
                 const addr16 = (@as(u16, byte2) << 8) | addr8;
 
                 const mem_ops = if (w == 0)
-                    makeSrcDst(2, .{
-                        .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } },
-                        .{ .imm = .{ .imm8 = 0 } },
-                    })
+                    SrcDst.init(2, .{ .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } }, .{ .imm = .{ .imm8 = 0 } } }, .byte)
                 else
-                    makeSrcDst(2, .{
-                        .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } },
-                        .{ .imm = .{ .imm8 = 0 } },
-                    });
+                    SrcDst.init(2, .{ .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } }, .{ .imm = .{ .imm8 = 0 } } }, .word);
 
                 var dst = &reg_ops;
                 var src = &mem_ops;
-                if (not_d == 1) std.mem.swap(*const [3]Operand, &dst, &src);
+                if (not_d == 1) std.mem.swap(*const SrcDst, &dst, &src);
 
                 return Instruction{
                     .mnemonic = .mov,
@@ -559,8 +578,8 @@ const DecodeIterator = struct {
                 const reg = bitsToReg(@truncate(u3, byte0), 1);
                 return Instruction{
                     .mnemonic = .xchg,
-                    .destination = makeSrcDst(1, .{.{ .reg = .ax }}),
-                    .source = makeSrcDst(1, .{.{ .reg = reg }}),
+                    .destination = SrcDst.init(1, .{.{ .reg = .ax }}, .word),
+                    .source = SrcDst.init(1, .{.{ .reg = reg }}, .word),
                     .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
@@ -577,12 +596,12 @@ const DecodeIterator = struct {
 
                 const byte1 = self.bytes[self.index + 1];
 
-                const jump_amount = makeSrcDst(1, .{.{ .imm = .{ .inst_addr = @bitCast(i8, byte1) } }});
+                const jump_amount = SrcDst.init(1, .{.{ .imm = .{ .inst_addr = @bitCast(i8, byte1) } }}, .byte);
 
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
                     .destination = jump_amount,
-                    .source = makeSrcDst(0, .{}),
+                    .source = SrcDst.init(0, .{}, .byte),
                     .encoded_bytes = 2,
                     .binary_index = self.index,
                 };
@@ -601,23 +620,23 @@ const DecodeIterator = struct {
                 defer self.index += @as(u8, 1) + @boolToInt(has_data);
 
                 const dest = if (w == 1)
-                    makeSrcDst(1, .{.{ .reg = .ax }})
+                    SrcDst.init(1, .{.{ .reg = .ax }}, .word)
                 else
-                    makeSrcDst(1, .{.{ .reg = .al }});
+                    SrcDst.init(1, .{.{ .reg = .al }}, .word);
 
                 const src = blk: {
                     if (has_data) {
                         const byte1 = @bitCast(i8, self.bytes[self.index + 1]);
-                        break :blk makeSrcDst(1, .{.{ .imm = .{ .imm8 = byte1 } }});
+                        break :blk SrcDst.init(1, .{.{ .imm = .{ .imm8 = byte1 } }}, .word);
                     } else {
-                        break :blk makeSrcDst(1, .{.{ .reg = .dx }});
+                        break :blk SrcDst.init(1, .{.{ .reg = .dx }}, .word);
                     }
                 };
 
                 const mn = Mnemonic.init(byte0);
                 var src_ptr = &src;
                 var dst_ptr = &dest;
-                if (mn == .out) std.mem.swap(*const [3]Operand, &src_ptr, &dst_ptr);
+                if (mn == .out) std.mem.swap(*const SrcDst, &src_ptr, &dst_ptr);
 
                 return Instruction{
                     .mnemonic = mn,
@@ -643,8 +662,8 @@ const DecodeIterator = struct {
                 const reg = bitsToSegReg(@truncate(u2, byte0 >> 3));
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
-                    .destination = makeSrcDst(1, .{.{ .reg = reg }}),
-                    .source = makeSrcDst(0, .{}),
+                    .destination = SrcDst.init(1, .{.{ .reg = reg }}, .word),
+                    .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
@@ -662,8 +681,8 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 return Instruction{
                     .mnemonic = Mnemonic.init(byte0),
-                    .destination = makeSrcDst(0, .{}),
-                    .source = makeSrcDst(0, .{}),
+                    .destination = SrcDst.init(0, .{}, undefined),
+                    .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
@@ -673,8 +692,8 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 return Instruction{
                     .mnemonic = .unknown,
-                    .destination = makeSrcDst(0, .{}),
-                    .source = makeSrcDst(0, .{}),
+                    .destination = SrcDst.init(0, .{}, undefined),
+                    .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
@@ -683,62 +702,50 @@ const DecodeIterator = struct {
     }
 };
 
-fn bitsToSrcDst(reg_or_mem: u3, mod: u2, w: u1, imm_value: Operand) [3]Operand {
+fn bitsToSrcDst(reg_or_mem: u3, mod: u2, w: u1, imm_value: Operand) SrcDst {
     // see table 4-10. we combine the bits into a 5 bit number, taking mod to be the most
     // significant bits
     var i: u5 = mod;
     i <<= 3;
     i |= reg_or_mem;
 
-    const none = Operand{ .none = {} };
-
     // TODO: tame this beast
-
     return switch (i) {
         // mod == 0b00
-        0b00_000 => .{ .{ .reg = .bx }, .{ .reg = .si }, none },
-        0b00_001 => .{ .{ .reg = .bx }, .{ .reg = .di }, none },
-        0b00_010 => .{ .{ .reg = .bp }, .{ .reg = .si }, none },
-        0b00_011 => .{ .{ .reg = .bp }, .{ .reg = .di }, none },
+        0b00_000 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .reg = .si } }, .byte),
+        0b00_001 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .reg = .di } }, .byte),
+        0b00_010 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .si } }, .byte),
+        0b00_011 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .di } }, .byte),
         // these have an immediate zero in them so the printer prints them as effective
         // address calculations.
-        0b00_100 => .{ .{ .reg = .si }, .{ .imm = .{ .imm8 = 0 } }, none },
-        0b00_101 => .{ .{ .reg = .di }, .{ .imm = .{ .imm8 = 0 } }, none },
-        0b00_110 => .{ imm_value, .{ .imm = .{ .imm8 = 0 } }, none },
-        0b00_111 => .{ .{ .reg = .bx }, .{ .imm = .{ .imm8 = 0 } }, none },
+        0b00_100 => SrcDst.init(2, .{ .{ .reg = .si }, .{ .imm = .{ .imm8 = 0 } } }, .byte),
+        0b00_101 => SrcDst.init(2, .{ .{ .reg = .di }, .{ .imm = .{ .imm8 = 0 } } }, .byte),
+        0b00_110 => SrcDst.init(2, .{ imm_value, .{ .imm = .{ .imm8 = 0 } } }, .byte),
+        0b00_111 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .imm = .{ .imm8 = 0 } } }, .byte),
 
         // mod == 0b01
-        0b01_000 => .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value },
-        0b01_001 => .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value },
-        0b01_010 => .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value },
-        0b01_011 => .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value },
-        0b01_100 => .{ .{ .reg = .si }, imm_value, none },
-        0b01_101 => .{ .{ .reg = .di }, imm_value, none },
-        0b01_110 => .{ .{ .reg = .bp }, imm_value, none },
-        0b01_111 => .{ .{ .reg = .bx }, imm_value, none },
+        0b01_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, .byte),
+        0b01_001 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value }, .byte),
+        0b01_010 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value }, .byte),
+        0b01_011 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value }, .byte),
+        0b01_100 => SrcDst.init(2, .{ .{ .reg = .si }, imm_value }, .byte),
+        0b01_101 => SrcDst.init(2, .{ .{ .reg = .di }, imm_value }, .byte),
+        0b01_110 => SrcDst.init(2, .{ .{ .reg = .bp }, imm_value }, .byte),
+        0b01_111 => SrcDst.init(2, .{ .{ .reg = .bx }, imm_value }, .byte),
 
         // mod == 0b10
-        0b10_000 => .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value },
-        0b10_001 => .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value },
-        0b10_010 => .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value },
-        0b10_011 => .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value },
-        0b10_100 => .{ .{ .reg = .si }, imm_value, none },
-        0b10_101 => .{ .{ .reg = .di }, imm_value, none },
-        0b10_110 => .{ .{ .reg = .bp }, imm_value, none },
-        0b10_111 => .{ .{ .reg = .bx }, imm_value, none },
+        0b10_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, .byte),
+        0b10_001 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .di }, imm_value }, .byte),
+        0b10_010 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .si }, imm_value }, .byte),
+        0b10_011 => SrcDst.init(3, .{ .{ .reg = .bp }, .{ .reg = .di }, imm_value }, .byte),
+        0b10_100 => SrcDst.init(2, .{ .{ .reg = .si }, imm_value }, .byte),
+        0b10_101 => SrcDst.init(2, .{ .{ .reg = .di }, imm_value }, .byte),
+        0b10_110 => SrcDst.init(2, .{ .{ .reg = .bp }, imm_value }, .byte),
+        0b10_111 => SrcDst.init(2, .{ .{ .reg = .bx }, imm_value }, .byte),
 
         // mod == 0b11. this case doesn't have any displacements so we just use bitsToReg
-        0b11_000...0b11_111 => .{ .{ .reg = bitsToReg(reg_or_mem, w) }, none, none },
+        0b11_000...0b11_111 => SrcDst.init(1, .{.{ .reg = bitsToReg(reg_or_mem, w) }}, .byte),
     };
-}
-
-fn numOps(ops: [3]Operand) usize {
-    var i: usize = 0;
-    for (ops) |op| {
-        if (std.meta.activeTag(op) == .none) break;
-        i += 1;
-    }
-    return i;
 }
 
 /// Interpret `ops` as the source/destination operands of some instruction. Compose the
@@ -746,9 +753,9 @@ fn numOps(ops: [3]Operand) usize {
 /// instruction and write the string to `writer`.
 ///
 /// TODO refactor this
-fn writeInstSrcDst(inst: Instruction, ops: [3]Operand, labels: std.AutoHashMap(usize, usize), writer: anytype) !void {
-    if (numOps(ops) == 1) {
-        switch (ops[0]) {
+fn writeInstSrcDst(inst: Instruction, ops: SrcDst, labels: std.AutoHashMap(usize, usize), writer: anytype) !void {
+    if (ops.numOps() == 1) {
+        switch (ops.op0.?) {
             .none => {},
             .reg => |r| try writer.print("{s}", .{@tagName(r)}),
             .imm => |iv| {
@@ -770,22 +777,30 @@ fn writeInstSrcDst(inst: Instruction, ops: [3]Operand, labels: std.AutoHashMap(u
             try writer.print("word ", .{});
         }
         try writer.print("[", .{});
-        for (ops, 0..) |op, i| {
-            switch (op) {
-                .none => {},
-                .reg => |r| {
-                    if (i > 0) try writer.print("+", .{});
-                    try writer.print("{s}", .{@tagName(r)});
-                },
-                .imm => |ival| {
-                    // TODO offset might be negative
-                    if (i > 0) try writer.print("+", .{});
-                    // TODO print in hex with dec in comment
-                    const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
-                    try writer.print("{}", .{pval});
-                },
+
+        const pOp = struct {
+            fn pOp(op: Operand, i: usize, writr: anytype) !void {
+                switch (op) {
+                    .none => {},
+                    .reg => |r| {
+                        if (i > 0) try writr.print("+", .{});
+                        try writr.print("{s}", .{@tagName(r)});
+                    },
+                    .imm => |ival| {
+                        // TODO offset might be negative
+                        if (i > 0) try writr.print("+", .{});
+                        // TODO print in hex with dec in comment
+                        const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
+                        try writr.print("{}", .{pval});
+                    },
+                }
             }
-        }
+        }.pOp;
+
+        if (ops.op0) |op0| try pOp(op0, 0, writer);
+        if (ops.op1) |op1| try pOp(op1, 1, writer);
+        if (ops.op2) |op2| try pOp(op2, 2, writer);
+
         try writer.print("]", .{});
     }
 }
@@ -823,8 +838,8 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
 
     // first pass: derive labels for jump instructions
     for (instructions.items) |inst| {
-        if (std.meta.activeTag(inst.destination[0]) == .imm and std.meta.activeTag(inst.destination[0].imm) == .inst_addr) {
-            const rel_addr = inst.destination[0].imm.inst_addr;
+        if (inst.destination.numOps() > 0 and std.meta.activeTag(inst.destination.op0.?) == .imm and std.meta.activeTag(inst.destination.op0.?.imm) == .inst_addr) {
+            const rel_addr = inst.destination.op0.?.imm.inst_addr;
             const abs_addr = @intCast(usize, @intCast(i64, inst.binary_index) + rel_addr + 2);
             if (!labels.contains(abs_addr)) {
                 try labels.put(abs_addr, next_label_num);
@@ -849,8 +864,8 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
 
         // instruction
         try writer.print("{s} ", .{@tagName(inst.mnemonic)});
-        const has_dest = numOps(inst.destination) > 0;
-        const has_src = numOps(inst.source) > 0;
+        const has_dest = inst.destination.numOps() > 0;
+        const has_src = inst.source.numOps() > 0;
         if (has_dest)
             try writeInstSrcDst(inst, inst.destination, labels, writer);
         if (has_dest and has_src)
