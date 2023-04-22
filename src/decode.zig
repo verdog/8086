@@ -15,9 +15,8 @@ const Register = enum(u8) {
 
 /// Instruction encoded immediate value.
 const Immediate = union(enum) {
-    imm8: i8,
-    inst_addr: i8, // instruction address. displayed differently.
-    imm16: i16, // TODO now that size is encoded in the Instruction, maybe all immediates can be imm16
+    inst_addr: i8, // instruction address. displayed differently (as labels).
+    imm16: i16,
 };
 
 /// An instruction operand. In practice, instructions can involve 3 operands for a single
@@ -325,38 +324,41 @@ const Instruction = struct {
             // the destination for now. if the d bit is set, we will swap them at the
             // very end.
 
-            // get the displacement, if applicable
-            const displacement = blk: {
+            const displacement_size: u8 = blk: {
                 if ((mod == 0b00 and rm != 0b110) or mod == 0b11) {
                     // instruction is two bytes long w/ no displacement, no action
                     // needed here.
-                    break :blk Operand{ .none = {} };
+                    break :blk 0;
                 } else if (mod == 0b01) {
                     // byte displacement. these are treated as signed integers and
                     // are sign extended (handled implicitly) to an i16 for computation.
-                    const byte2 = bytes[2];
-                    break :blk Operand{ .imm = .{ .imm8 = @bitCast(i8, byte2) } };
+                    break :blk 1;
                 } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
                     // word displacement or the special 0b11 case:
                     // a direct address mov with a two byte operand
-                    const byte2 = bytes[2];
-                    const byte3 = bytes[3];
-                    break :blk Operand{ .imm = .{ .imm16 = (@as(i16, byte3) << 8) | byte2 } };
+                    break :blk 2;
                 } else {
                     unreachable;
                 }
             };
-
-            const displacement_size: u8 = switch (displacement) {
-                .none => 0,
-                .imm => |i| switch (i) {
-                    .imm8 => 1,
-                    .imm16 => 2,
-                    else => unreachable,
-                },
-                else => unreachable,
-            };
             defer parsed_len += displacement_size;
+
+            // get the displacement, if applicable
+            const displacement = blk: {
+                switch (displacement_size) {
+                    0 => break :blk Operand{ .none = {} },
+                    1 => {
+                        const byte2 = bytes[2];
+                        break :blk Operand{ .imm = .{ .imm16 = @bitCast(i8, byte2) } };
+                    },
+                    2 => {
+                        const byte2 = bytes[2];
+                        const byte3 = bytes[3];
+                        break :blk Operand{ .imm = .{ .imm16 = (@as(i16, byte3) << 8) | byte2 } };
+                    },
+                    else => unreachable,
+                }
+            };
 
             // now we can finally get the destination from [mod/reg/rm] and [displo]/[disphi]
             const dst = bitsToSrcDst(rm, mod, w, displacement);
@@ -377,7 +379,7 @@ const Instruction = struct {
                         // if w == 1, the destination will be wide, so we should decode it
                         // as a word
                         if (w == 0)
-                            Operand{ .imm = .{ .imm8 = @bitCast(i8, byte_low) } }
+                            Operand{ .imm = .{ .imm16 = @bitCast(i8, byte_low) } }
                         else
                             Operand{ .imm = .{ .imm16 = @as(i16, @bitCast(i8, byte_low)) } }
                     else
@@ -471,7 +473,7 @@ const DecodeIterator = struct {
                 const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
 
                 const imm = if (w == 0)
-                    Operand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } }
+                    Operand{ .imm = .{ .imm16 = @bitCast(i8, byte1) } }
                 else
                     Operand{ .imm = .{ .imm16 = @as(i16, byte2) << 8 | byte1 } };
 
@@ -527,7 +529,7 @@ const DecodeIterator = struct {
                 const byte1 = self.bytes[starting_index + 1];
                 const imm = blk: {
                     const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
-                    break :blk if (w == 0) Operand{ .imm = .{ .imm8 = @bitCast(i8, byte1) } } else Operand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
+                    break :blk if (w == 0) Operand{ .imm = .{ .imm16 = @bitCast(i8, byte1) } } else Operand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
                 };
 
                 const reg = bitsToReg(reg_bits, w);
@@ -562,9 +564,9 @@ const DecodeIterator = struct {
                 const addr16 = (@as(u16, byte2) << 8) | addr8;
 
                 const mem_ops = if (w == 0)
-                    SrcDst.init(2, .{ .{ .imm = .{ .imm8 = @bitCast(i8, addr8) } }, .{ .imm = .{ .imm8 = 0 } } }, .byte)
+                    SrcDst.init(2, .{ .{ .imm = .{ .imm16 = @bitCast(i8, addr8) } }, .{ .imm = .{ .imm16 = 0 } } }, .byte)
                 else
-                    SrcDst.init(2, .{ .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } }, .{ .imm = .{ .imm8 = 0 } } }, .word);
+                    SrcDst.init(2, .{ .{ .imm = .{ .imm16 = @bitCast(i16, addr16) } }, .{ .imm = .{ .imm16 = 0 } } }, .word);
 
                 var dst = &reg_ops;
                 var src = &mem_ops;
@@ -634,7 +636,7 @@ const DecodeIterator = struct {
                 const src = blk: {
                     if (has_data) {
                         const byte1 = @bitCast(i8, self.bytes[self.index + 1]);
-                        break :blk SrcDst.init(1, .{.{ .imm = .{ .imm8 = byte1 } }}, .byte);
+                        break :blk SrcDst.init(1, .{.{ .imm = .{ .imm16 = byte1 } }}, .byte);
                     } else {
                         break :blk SrcDst.init(1, .{.{ .reg = .dx }}, .word);
                     }
@@ -727,10 +729,10 @@ fn bitsToSrcDst(reg_or_mem: u3, mod: u2, w: u1, imm_value: Operand) SrcDst {
         0b00_011 => SrcDst.init(2, .{ .{ .reg = .bp }, .{ .reg = .di } }, size),
         // these have an immediate zero in them so the printer prints them as effective
         // address calculations.
-        0b00_100 => SrcDst.init(2, .{ .{ .reg = .si }, .{ .imm = .{ .imm8 = 0 } } }, size),
-        0b00_101 => SrcDst.init(2, .{ .{ .reg = .di }, .{ .imm = .{ .imm8 = 0 } } }, size),
-        0b00_110 => SrcDst.init(2, .{ imm_value, .{ .imm = .{ .imm8 = 0 } } }, size),
-        0b00_111 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .imm = .{ .imm8 = 0 } } }, size),
+        0b00_100 => SrcDst.init(2, .{ .{ .reg = .si }, .{ .imm = .{ .imm16 = 0 } } }, size),
+        0b00_101 => SrcDst.init(2, .{ .{ .reg = .di }, .{ .imm = .{ .imm16 = 0 } } }, size),
+        0b00_110 => SrcDst.init(2, .{ imm_value, .{ .imm = .{ .imm16 = 0 } } }, size),
+        0b00_111 => SrcDst.init(2, .{ .{ .reg = .bx }, .{ .imm = .{ .imm16 = 0 } } }, size),
 
         // mod == 0b01
         0b01_000 => SrcDst.init(3, .{ .{ .reg = .bx }, .{ .reg = .si }, imm_value }, size),
@@ -790,10 +792,9 @@ fn writeInstSrcDst(inst: Instruction, srcdst: SrcDst, labels: std.AutoHashMap(us
             },
             .imm => |ival| {
                 switch (ival) {
-                    .imm8, .imm16 => {
+                    .imm16 => |pval| {
                         if (i > 0) try writer.print("+", .{});
                         // TODO print in hex with dec in comment
-                        const pval = if (std.meta.activeTag(ival) == .imm8) @intCast(i16, ival.imm8) else ival.imm16;
                         try writer.print("{}", .{pval});
                     },
                     .inst_addr => |rel_addr| {
