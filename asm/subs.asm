@@ -60,3 +60,6 @@ cmp [bp + 2], si
 cmp bl, 20
 cmp byte [bx], 34
 cmp ax, 23909
+
+aas
+das

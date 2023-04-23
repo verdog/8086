@@ -47,6 +47,8 @@ const Mnemonic = enum {
 
     aaa,
     daa,
+    aas,
+    das,
 
     je,
     jl,
@@ -111,6 +113,8 @@ const Mnemonic = enum {
 
             0b00110111 => return .aaa,
             0b00100111 => return .daa,
+            0b00111111 => return .aas,
+            0b00101111 => return .das,
 
             0b00101000...0b00101011, // sub reg/mem from reg to reg/mem
             0b00101100...0b00101101, // sub imm to ax
@@ -707,6 +711,8 @@ const DecodeIterator = struct {
             0b10011110, // sahf
             0b00110111, // aaa
             0b00100111, // daa
+            0b00111111, // aas
+            0b00101111, // das
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -889,15 +895,19 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         }
 
         // instruction
-        try writer.print("{s} ", .{@tagName(inst.mnemonic)});
+        try writer.print("{s}", .{@tagName(inst.mnemonic)});
         const has_dest = inst.destination.numOps() > 0;
         const has_src = inst.source.numOps() > 0;
-        if (has_dest)
+        if (has_dest) {
+            try writer.print(" ", .{});
             try writeInstSrcDst(inst, inst.destination, labels, writer);
+        }
         if (has_dest and has_src)
-            try writer.print(", ", .{});
-        if (has_src)
+            try writer.print(",", .{});
+        if (has_src) {
+            try writer.print(" ", .{});
             try writeInstSrcDst(inst, inst.source, labels, writer);
+        }
         try writer.print("\n\n", .{});
     }
 }
