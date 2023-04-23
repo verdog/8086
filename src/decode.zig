@@ -14,6 +14,7 @@ const Register = enum(u8) {
 };
 
 /// Instruction encoded immediate value.
+/// TODO fold this up into Operand
 const Immediate = union(enum) {
     inst_addr: i8, // instruction address. displayed differently (as labels).
     imm16: i16,
@@ -41,13 +42,26 @@ const Mnemonic = enum {
     sub,
     sbb,
     dec,
+
+    @"and",
+    @"or",
+    xor,
     cmp,
-    neg,
+    @"test",
 
     mul,
     imul,
     div,
     idiv,
+    neg,
+    not,
+    shl,
+    shr,
+    sar,
+    rol,
+    ror,
+    rcl,
+    rcr,
 
     aaa,
     daa,
@@ -144,6 +158,22 @@ const Mnemonic = enum {
             0b01001000...0b01001111, // dec register
             => return .dec,
 
+            0b00100000...0b00100011, // and reg/mem and reg
+            0b00100100...0b00100101, // and imm with ax
+            => return .@"and",
+
+            0b00001000...0b00001011, // or reg/mem with reg
+            0b00001100...0b00001101, // or imm with ax
+            => return .@"or",
+
+            0b00110000...0b00110011, // xor reg/mem with reg
+            0b00110100...0b00110101, // xor imm with ax
+            => return .xor,
+
+            0b10000100...0b10000101, // test
+            0b10101000...0b10101001, // test with ax
+            => return .@"test",
+
             0b01110100 => return .je,
             0b01111100 => return .jl,
             0b01111110 => return .jle,
@@ -222,16 +252,33 @@ const Mnemonic = enum {
                 0b00101000 => .sub,
                 0b00011000 => .sbb,
                 0b00111000 => .cmp,
+                0b00100000 => .@"and",
+                0b00001000 => .@"or",
+                0b00110000 => .xor,
                 else => .unknown,
             },
 
-            // mul, imul, div, idiv, neg
+            // mul, imul, div, idiv, neg, not, test
             0b11110110...0b11110111 => switch (bytes[1] & 0b00111000) {
                 0b00100000 => .mul,
                 0b00101000 => .imul,
                 0b00110000 => .div,
                 0b00111000 => .idiv,
                 0b00011000 => .neg,
+                0b00010000 => .not,
+                0b00000000 => .@"test",
+                else => .unknown,
+            },
+
+            // shifts and rotates
+            0b11010000...0b11010011 => switch (bytes[1] & 0b00111000) {
+                0b00100000 => .shl,
+                0b00101000 => .shr,
+                0b00111000 => .sar,
+                0b00000000 => .rol,
+                0b00001000 => .ror,
+                0b00010000 => .rcl,
+                0b00011000 => .rcr,
                 else => .unknown,
             },
 
@@ -301,6 +348,116 @@ const SrcDst = struct {
     }
 };
 
+const InstructionParts = struct {
+    mod_rm: SrcDst,
+    reg: SrcDst,
+    immediate: ?SrcDst,
+    encoded_bytes: u8, // never more than 6
+
+    /// Many instructions share a common encoding scheme:
+    ///
+    /// [ byte0 ] [ mod/reg/rm ] [ disp lo ] [ disp hi ] [ data lo ] [ data hi ]
+    /// disp and data are optional.
+    ///
+    /// This function reads between 2 and 6 bytes and decodes the mod/reg/rm, disp, and
+    /// immediate
+    pub fn init(bytes: []const u8, wide: bool, has_immediate: bool, immediate_is_wide: bool) InstructionParts {
+        std.debug.assert(bytes.len >= 2);
+        const mod_rm_result = getModRm(bytes, wide);
+        const mod_rm = mod_rm_result.srcdst;
+        const encoded_displacement_size = mod_rm_result.encoded_displacement_size;
+
+        const immediate = if (has_immediate)
+            getImmediate(bytes, encoded_displacement_size, immediate_is_wide)
+        else
+            null;
+        const encoded_immediate_size = if (has_immediate)
+            @as(u8, 1) + @boolToInt(immediate_is_wide)
+        else
+            0;
+
+        const reg = SrcDst.init(1, .{.{ .reg = bitsToReg(@truncate(u3, bytes[1] >> 3), @boolToInt(wide)) }}, if (wide) .word else .byte);
+
+        const encoded_bytes = 2 + encoded_displacement_size + encoded_immediate_size;
+        std.debug.assert(encoded_bytes <= 6);
+
+        return InstructionParts{
+            .mod_rm = mod_rm,
+            .reg = reg,
+            .immediate = immediate,
+            .encoded_bytes = encoded_bytes,
+        };
+    }
+
+    fn getModRm(bytes: []const u8, wide: bool) struct {
+        srcdst: SrcDst,
+        encoded_displacement_size: u8,
+    } {
+        const mod = @truncate(u2, bytes[1] >> 6);
+        const rm = @truncate(u3, bytes[1]);
+
+        if (mod == 0b11) {
+            // register with no displacement
+            return .{
+                .srcdst = SrcDst.init(1, .{.{ .reg = bitsToReg(rm, @boolToInt(wide)) }}, if (wide) .word else .byte),
+                .encoded_displacement_size = 0,
+            };
+        }
+
+        // there is some effective address calculation present
+
+        // how big is the [displo]/[disphi] encoded portion?
+        const encoded_displacement_size: u8 = blk: {
+            if ((mod == 0b00 and rm != 0b110) or mod == 0b11) {
+                // instruction is two bytes long w/ no encoded (i.e. an implicit) displacement
+                break :blk 0;
+            } else if (mod == 0b01) {
+                // byte displacement. these are treated as signed integers and
+                // are sign extended (handled implicitly) to an i16 for computation.
+                break :blk 1;
+            } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
+                // word displacement or the special 0b11 case:
+                // a direct address mov with a two byte operand
+                break :blk 2;
+            } else {
+                unreachable;
+            }
+        };
+
+        // now decode the displacement
+        const displacement = blk: {
+            switch (encoded_displacement_size) {
+                0 => {
+                    // will go unused
+                    break :blk undefined;
+                },
+                1 => {
+                    const byte2 = bytes[2];
+                    break :blk Operand{ .imm = .{ .imm16 = @bitCast(i8, byte2) } };
+                },
+                2 => {
+                    const byte2 = bytes[2];
+                    const byte3 = bytes[3];
+                    break :blk Operand{ .imm = .{ .imm16 = (@as(i16, byte3) << 8) | byte2 } };
+                },
+                else => unreachable,
+            }
+        };
+
+        return .{
+            .srcdst = bitsToSrcDst(rm, mod, @boolToInt(wide), displacement),
+            .encoded_displacement_size = encoded_displacement_size,
+        };
+    }
+
+    fn getImmediate(bytes: []const u8, encoded_displacement_size: u8, immediate_is_wide: bool) SrcDst {
+        var byte_low: u8 = bytes[2 + encoded_displacement_size];
+        var byte_high: u8 = if (immediate_is_wide) bytes[2 + encoded_displacement_size + 1] else 0;
+        const imm_op = Operand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
+        return SrcDst.init(1, .{imm_op}, if (immediate_is_wide) .word else .byte);
+    }
+};
+
 /// The main instruction struct. Each instruction is decoded into an instance of this.
 const Instruction = struct {
     mnemonic: Mnemonic,
@@ -312,151 +469,6 @@ const Instruction = struct {
     /// Size of the operand in machine code.
     encoded_bytes: u8,
     binary_index: usize,
-
-    /// Many instructions share a common encoding scheme:
-    ///
-    /// [ byte0 ] [ mod/reg/rm ] [ disp lo ] [ disp hi ] [ data lo ] [ data hi ]
-    /// disp and data are optional.
-    ///
-    /// byte0 will encode the mnemonic, but the operand data is packed basically the same way.
-    /// This function takes between 2 and 6 bytes and generates an `Instruction` by
-    /// interpreting them as being in the "6 Arithmetic" pattern.
-    pub fn initFrom6Arith(bytes: []const u8, idx: usize) Instruction {
-        std.debug.assert(bytes.len >= 2 and bytes.len <= 6);
-
-        var parsed_len: u8 = 0;
-        var src_ptr: *const SrcDst = undefined; // set in block below
-        var dst_ptr: *const SrcDst = undefined; // set in block below
-
-        // TODO fix up the weird control flow of this function. we are probably abusing defer
-        {
-            // if true, there is an immediate value on the end ([ data lo ] [ data hi])
-            //
-            // TODO maybe we can break this down even further. it would be nice to
-            // have to seperate branches for has_immediate and !has_immediate, since
-            // they *are* different. for now, the benefit of sharing their very
-            // similar decoding logic outweights the readability penalty of having a
-            // flag at the top of the function that can subtly change logic... i hope.
-            const byte0 = bytes[0];
-            // TODO make this check less cryptic. it's checking for a mov imm opcode or an
-            // arithmetic imm opcode.
-            // TODO three flags?? getting dangerous. untangle all this mess once the tests
-            // pass.
-            const has_immediate_mov = byte0 & 0b11111110 == 0b11000110;
-            const has_immediate_math = byte0 & 0b11111100 == 0b10000000;
-            const is_load_effective =
-                Mnemonic.init(bytes[0]) == .lea or
-                Mnemonic.init(bytes[0]) == .lds or
-                Mnemonic.init(bytes[0]) == .les;
-
-            const d = @truncate(u1, byte0 >> 1);
-            const w = @truncate(u1, byte0) | @boolToInt(is_load_effective);
-
-            // [ mod/reg/rm ]
-            const byte1 = bytes[1];
-            const mod = @truncate(u2, byte1 >> 6);
-            const reg = @truncate(u3, byte1 >> 3);
-            const rm = @truncate(u3, byte1);
-
-            // all cases read at least 2 bytes
-            defer parsed_len += 2;
-
-            // assume that the location described in [mod/reg/rm] and [displo/hi] is
-            // the destination for now. if the d bit is set, we will swap them at the
-            // very end.
-
-            const displacement_size: u8 = blk: {
-                if ((mod == 0b00 and rm != 0b110) or mod == 0b11) {
-                    // instruction is two bytes long w/ no displacement, no action
-                    // needed here.
-                    break :blk 0;
-                } else if (mod == 0b01) {
-                    // byte displacement. these are treated as signed integers and
-                    // are sign extended (handled implicitly) to an i16 for computation.
-                    break :blk 1;
-                } else if (mod == 0b10 or (mod == 0b00 and rm == 0b110)) {
-                    // word displacement or the special 0b11 case:
-                    // a direct address mov with a two byte operand
-                    break :blk 2;
-                } else {
-                    unreachable;
-                }
-            };
-            defer parsed_len += displacement_size;
-
-            // get the displacement, if applicable
-            const displacement = blk: {
-                switch (displacement_size) {
-                    0 => break :blk Operand{ .none = {} },
-                    1 => {
-                        const byte2 = bytes[2];
-                        break :blk Operand{ .imm = .{ .imm16 = @bitCast(i8, byte2) } };
-                    },
-                    2 => {
-                        const byte2 = bytes[2];
-                        const byte3 = bytes[3];
-                        break :blk Operand{ .imm = .{ .imm16 = (@as(i16, byte3) << 8) | byte2 } };
-                    },
-                    else => unreachable,
-                }
-            };
-
-            // now we can finally get the destination from [mod/reg/rm] and [displo]/[disphi]
-            const dst = bitsToSrcDst(rm, mod, w, displacement);
-
-            // now get the source. again, for now, we assume that the source is the
-            // reg/mem in [mod/reg/rm] or the immediate in the case of has_immediate.
-            // we will check the d bit and swap as necessary at the end.
-
-            const wide_immediate = (has_immediate_mov and w == 1) or (has_immediate_math and w == 1 and d == 0);
-            const src_op = blk: {
-                // the usage of the d bit here is actually checking what the manual labels
-                // as s.
-                if (has_immediate_mov or has_immediate_math) {
-                    var byte_low: u8 = bytes[2 + displacement_size];
-                    var byte_high: u8 = if (w == 1) bytes[2 + displacement_size + 1] else undefined;
-
-                    break :blk if (!wide_immediate)
-                        // if w == 1, the destination will be wide, so we should decode it
-                        // as a word
-                        if (w == 0)
-                            Operand{ .imm = .{ .imm16 = @bitCast(i8, byte_low) } }
-                        else
-                            Operand{ .imm = .{ .imm16 = @as(i16, @bitCast(i8, byte_low)) } }
-                    else
-                        Operand{ .imm = .{ .imm16 = byte_low | (@as(i16, byte_high) << 8) } };
-                } else {
-                    break :blk Operand{ .reg = bitsToReg(reg, w) };
-                }
-            };
-
-            const src_size: u8 = switch (src_op) {
-                .imm => @as(u8, 1) + @boolToInt(wide_immediate),
-                .reg => 0,
-                else => unreachable,
-            };
-            defer parsed_len += src_size;
-
-            const src = SrcDst.init(1, .{src_op}, if (w == 0) .byte else .word);
-
-            // swap src and dst if the d bit is not set. watch out, in imm to reg/mem,
-            // the d bit is always 1.
-            src_ptr = &src;
-            dst_ptr = &dst;
-
-            const swap = (d == 1 and !(has_immediate_mov or has_immediate_math)) or
-                is_load_effective == true;
-            if (swap) std.mem.swap(*const SrcDst, &src_ptr, &dst_ptr);
-        }
-
-        return Instruction{
-            .mnemonic = Mnemonic.init2(bytes[0..2].*),
-            .destination = dst_ptr.*,
-            .source = src_ptr.*,
-            .encoded_bytes = parsed_len,
-            .binary_index = idx,
-        };
-    }
 };
 
 /// Iterate through a byte buffer and produce `Instruction`s.
@@ -473,34 +485,130 @@ const DecodeIterator = struct {
 
     /// Decode the next instruction in the buffer. return null at the end.
     pub fn next(self: *DecodeIterator) ?Instruction {
-        const starting_index = self.index;
         if (self.index >= self.bytes.len) return null;
 
-        const byte0 = self.bytes[self.index];
-
-        switch (byte0) {
-            // instructions that fit the initFrom6Arith pattern
+        switch (self.bytes[self.index]) {
             0b10001000...0b10001011, // mov reg/mem to/from reg,
-            0b11000110...0b11000111, // mov imm to reg/mem,
             0b00000000...0b00000011, // add reg/mem with reg to reg/mem,
             0b00010000...0b00010011, // adc reg/mem with reg to reg/mem,
             0b00101000...0b00101011, // sub reg/mem from reg to reg/mem,
             0b00011000...0b00011011, // sbb reg/mem from reg to reg/mem,
             0b00111000...0b00111011, // cmp reg/mem with reg,
-            0b10000000...0b10000011, // arith* imm to reg/mem (*add, adc, sub, sbb, cmp)
+            0b00100000...0b00100011, // and reg/mem with reg to reg/mem,
             0b10000110...0b10000111, // xchg reg/mem with reg
+            0b00001000...0b00001011, // or reg/mem with reg
+            0b00110000...0b00110011, // xor reg/mem with reg
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                const slice = self.bytes[self.index..end];
+
+                const wide = @truncate(u1, slice[0]) == 1;
+                const has_immediate = false;
+                const immediate_is_wide = false;
+                const d_bit = @truncate(u1, slice[0] >> 1) == 1;
+
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                defer self.index += ip.encoded_bytes;
+
+                var i = Instruction{
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = if (d_bit) ip.reg else ip.mod_rm,
+                    .source = if (d_bit) ip.mod_rm else ip.reg,
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
+                return i;
+            },
+
+            0b10000100...0b10000101, // test reg/mem with reg,
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                const slice = self.bytes[self.index..end];
+
+                const wide = @truncate(u1, slice[0]) == 1;
+                const has_immediate = false;
+                const immediate_is_wide = false;
+
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                defer self.index += ip.encoded_bytes;
+
+                var i = Instruction{
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = ip.mod_rm,
+                    .source = ip.reg,
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
+                return i;
+            },
+
             0b10001101, // lea
             0b11000101, // lds
             0b11000100, // les
             => {
                 const end = @min(self.bytes.len, self.index + 6);
-                var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
-                defer self.index += i.encoded_bytes;
-                if (i.mnemonic == .lds or i.mnemonic == .les) {
-                    // nasm does *not* want you to specify the size of the memory address
-                    // for these instructions...
-                    i.source.size = .unspecified;
-                }
+                const slice = self.bytes[self.index..end];
+
+                // these loads are implicitly wide
+                const wide = true;
+                const has_immediate = false;
+                const immediate_is_wide = false;
+
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                defer self.index += ip.encoded_bytes;
+
+                var i = Instruction{
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = ip.reg,
+                    .source = ip.mod_rm,
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
+                // nasm does *not* want you to specify the size of the memory address
+                // for these instructions...
+                i.source.size = .unspecified;
+
+                return i;
+            },
+
+            0b11000110...0b11000111, // mov imm to reg/mem,
+            // arith* imm to reg/mem (*add, adc, sub, sbb, cmp, and, or, xor)
+            0b10000000...0b10000011,
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                const slice = self.bytes[self.index..end];
+
+                const wide = @truncate(u1, slice[0]) == 1;
+
+                const has_immediate = true;
+                const immediate_is_wide = blk: {
+                    if (slice[0] & 0b11111110 == 0b11000110) {
+                        // in a mov imm, the w bit alone determines the size of the immediate
+                        break :blk wide;
+                    } else if (slice[0] & 0b11111100 == 0b10000000) {
+                        // in an arithmetic-like instruction, there is an extra s bit. the
+                        // immediate is wide if s == 0 and w == 1.
+                        const s = @truncate(u1, slice[0] >> 1) == 1;
+                        break :blk !s and wide;
+                    } else {
+                        unreachable;
+                    }
+                };
+
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                defer self.index += ip.encoded_bytes;
+
+                var i = Instruction{
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = ip.mod_rm,
+                    .source = ip.immediate.?,
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
                 return i;
             },
 
@@ -510,10 +618,14 @@ const DecodeIterator = struct {
             0b00101100...0b00101101, // *sub
             0b00011100...0b00011101, // *sbb
             0b00111100...0b00111101, // *cmp
+            0b00100100...0b00100101, // *and
+            0b10101000...0b10101001, // *test
+            0b00001100...0b00001101, // *or
+            0b00110100...0b00110101, // *xor
             => {
-                const w = @truncate(u1, byte0);
-                const byte1 = self.bytes[starting_index + 1];
-                const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
+                const w = @truncate(u1, self.bytes[self.index]);
+                const byte1 = self.bytes[self.index + 1];
+                const byte2 = if (w == 1) self.bytes[self.index + 2] else undefined;
 
                 const imm = if (w == 0)
                     Operand{ .imm = .{ .imm16 = @bitCast(i8, byte1) } }
@@ -528,7 +640,7 @@ const DecodeIterator = struct {
                 defer self.index += @as(u8, 2) + w;
 
                 return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{reg}, if (w == 0) .byte else .word),
                     .source = SrcDst.init(1, .{imm}, if (w == 0) .byte else .word),
                     .encoded_bytes = @as(u8, 2) + w,
@@ -538,26 +650,41 @@ const DecodeIterator = struct {
 
             0b11111110...0b11111111, // push/inc/dec reg/mem
             0b10001111, // pop reg/mem
-            0b11110110...0b11110111, // mul/imul/div/idiv/neg
+            0b11110110...0b11110111, // mul/imul/div/idiv/neg/not/test
             => {
                 const end = @min(self.bytes.len, self.index + 6);
-                var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
-                i.destination = SrcDst.init(0, .{}, .byte);
-                defer self.index += i.encoded_bytes;
+                const slice = self.bytes[self.index..end];
+
+                const wide = @truncate(u1, self.bytes[self.index]) == 1;
+                // test is unique in that it always has an immediate
+                const has_immediate = slice[0] & 0b11111110 == 0b11110110 and slice[1] & 0b00111000 == 0b00000000;
+                const immediate_is_wide = wide;
+
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                defer self.index += ip.encoded_bytes;
+
+                var i = Instruction{
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = ip.mod_rm,
+                    .source = if (has_immediate) ip.immediate.? else SrcDst.init(0, .{}, undefined), // TODO consider making this null
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
                 return i;
             },
 
-            // push/pop/incdec register oooooreg
+            // push/pop/inc/dec register oooooreg
             0b01010000...0b01011111, // push/pop
             0b01000000...0b01000111, // inc
             0b01001000...0b01001111, // dec
             => {
                 // w is implicitly 1
-                const reg = bitsToReg(@truncate(u3, byte0), 1);
+                const reg = bitsToReg(@truncate(u3, self.bytes[self.index]), 1);
 
                 defer self.index += 1;
                 return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .reg = reg }}, .byte),
                     .source = SrcDst.init(0, .{}, .byte),
                     .encoded_bytes = 1,
@@ -565,15 +692,51 @@ const DecodeIterator = struct {
                 };
             },
 
+            0b11010000...0b11010011, // shl/shr/sar/rol/ror/rcl/rcr
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                const slice = self.bytes[self.index..end];
+
+                const wide = @truncate(u1, slice[0]) == 1;
+                const has_immediate = false;
+                const immediate_is_wide = false;
+
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                defer self.index += ip.encoded_bytes;
+
+                // the 2nd lsb determines if the src is the immediate 1 or the register
+                // cl. see table 4-7 and page 4-24
+                const v_bit = @truncate(u1, slice[0] >> 1) == 1;
+                const source = if (v_bit)
+                    SrcDst.init(1, .{.{ .reg = .cl }}, .byte)
+                else
+                    SrcDst.init(1, .{.{ .imm = .{ .imm16 = 1 } }}, .word);
+
+                var i = Instruction{
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = ip.mod_rm,
+                    .source = source,
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
+                if (!v_bit) {
+                    // nasm will encode this incorrectly if any size is specified
+                    i.source.size = .unspecified;
+                }
+
+                return i;
+            },
+
             // mov imm to reg
             // 1011wreg
             0b10110000...0b10111111 => {
-                const w = @truncate(u1, byte0 >> 3);
-                const reg_bits = @truncate(u3, byte0);
+                const w = @truncate(u1, self.bytes[self.index] >> 3);
+                const reg_bits = @truncate(u3, self.bytes[self.index]);
                 defer self.index += @as(u8, 2) + w;
-                const byte1 = self.bytes[starting_index + 1];
+                const byte1 = self.bytes[self.index + 1];
                 const imm = blk: {
-                    const byte2 = if (w == 1) self.bytes[starting_index + 2] else undefined;
+                    const byte2 = if (w == 1) self.bytes[self.index + 2] else undefined;
                     break :blk if (w == 0) Operand{ .imm = .{ .imm16 = @bitCast(i8, byte1) } } else Operand{ .imm = .{ .imm16 = (@as(i16, byte2) << 8) | byte1 } };
                 };
 
@@ -594,8 +757,8 @@ const DecodeIterator = struct {
             0b10100000...0b10100011 => {
                 // for some reason, the usual d logic is reversed for this instruction.
                 // (it's not actually labeled as a d bit in the manual)
-                const not_d = @truncate(u1, byte0 >> 1);
-                const w = @truncate(u1, byte0);
+                const not_d = @truncate(u1, self.bytes[self.index] >> 1);
+                const w = @truncate(u1, self.bytes[self.index]);
 
                 defer self.index += @as(u8, 2) + w;
 
@@ -629,7 +792,7 @@ const DecodeIterator = struct {
             // xchg reg with ax 0b10010reg
             0b10010000...0b10010111 => {
                 defer self.index += 1;
-                const reg = bitsToReg(@truncate(u3, byte0), 1);
+                const reg = bitsToReg(@truncate(u3, self.bytes[self.index]), 1);
                 return Instruction{
                     .mnemonic = .xchg,
                     .destination = SrcDst.init(1, .{.{ .reg = .ax }}, .word),
@@ -653,7 +816,7 @@ const DecodeIterator = struct {
                 const jump_amount = SrcDst.init(1, .{.{ .imm = .{ .inst_addr = @bitCast(i8, byte1) } }}, .byte);
 
                 return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = jump_amount,
                     .source = SrcDst.init(0, .{}, .byte),
                     .encoded_bytes = 2,
@@ -669,8 +832,8 @@ const DecodeIterator = struct {
             => {
                 // for these specific opcodes, the 4th lsb happens to be 0 when an extra
                 // byte of data is present.
-                const has_data = (byte0 & 0b0001000) == 0;
-                const w = @truncate(u1, byte0);
+                const has_data = (self.bytes[self.index] & 0b0001000) == 0;
+                const w = @truncate(u1, self.bytes[self.index]);
                 defer self.index += @as(u8, 1) + @boolToInt(has_data);
 
                 const dest = if (w == 1)
@@ -687,7 +850,7 @@ const DecodeIterator = struct {
                     }
                 };
 
-                const mn = Mnemonic.init(byte0);
+                const mn = Mnemonic.init(self.bytes[self.index]);
                 var src_ptr = &src;
                 var dst_ptr = &dest;
                 if (mn == .out) std.mem.swap(*const SrcDst, &src_ptr, &dst_ptr);
@@ -713,9 +876,9 @@ const DecodeIterator = struct {
             0b00011111,
             => {
                 defer self.index += 1;
-                const reg = bitsToSegReg(@truncate(u2, byte0 >> 3));
+                const reg = bitsToSegReg(@truncate(u2, self.bytes[self.index] >> 3));
                 return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .reg = reg }}, .word),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
@@ -738,7 +901,7 @@ const DecodeIterator = struct {
             => {
                 defer self.index += 1;
                 return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
@@ -752,7 +915,7 @@ const DecodeIterator = struct {
             => {
                 defer self.index += 2;
                 return Instruction{
-                    .mnemonic = Mnemonic.init(byte0),
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 2,
@@ -1096,6 +1259,11 @@ test "e2e subs" {
 test "e2e muls" {
     const alctr = std.testing.allocator;
     try e2eTest("muls", alctr);
+}
+
+test "e2e logic_and_bits" {
+    const alctr = std.testing.allocator;
+    try e2eTest("logic_and_bits", alctr);
 }
 
 // test "e2e 0042" {
