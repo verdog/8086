@@ -37,7 +37,12 @@ const Mnemonic = enum {
     add,
     adc,
     inc,
+
     sub,
+    sbb,
+    dec,
+    neg,
+
     cmp,
 
     aaa,
@@ -111,9 +116,19 @@ const Mnemonic = enum {
             0b00101100...0b00101101, // sub imm to ax
             => return .sub,
 
+            0b00011000...0b00011011, // sbb reg/mem from reg to reg/mem
+            0b00011100...0b00011101, // sbb imm to ax
+            => return .sbb,
+
             0b00111000...0b00111011, // cmp reg/mem and reg
             0b00111100...0b00111101, // cmp imm with ax
             => return .cmp,
+
+            0b01001000...0b01001111, // dec register
+            => return .dec,
+
+            0b11110110...0b11110111, // neg reg/mem
+            => return .neg,
 
             0b01110100 => return .je,
             0b01111100 => return .jl,
@@ -191,13 +206,15 @@ const Mnemonic = enum {
                 0b00000000 => .add,
                 0b00010000 => .adc,
                 0b00101000 => .sub,
+                0b00011000 => .sbb,
                 0b00111000 => .cmp,
                 else => .unknown,
             },
 
-            // push, inc reg/mem
+            // push, inc, dec reg/mem
             0b11111110...0b11111111 => switch (bytes[1] & 0b00111000) {
                 0b00000000 => .inc,
+                0b00001000 => .dec,
                 0b00110000 => .push,
                 else => .unknown,
             },
@@ -444,8 +461,9 @@ const DecodeIterator = struct {
             0b00000000...0b00000011, // add reg/mem with reg to reg/mem,
             0b00010000...0b00010011, // adc reg/mem with reg to reg/mem,
             0b00101000...0b00101011, // sub reg/mem from reg to reg/mem,
+            0b00011000...0b00011011, // sbb reg/mem from reg to reg/mem,
             0b00111000...0b00111011, // cmp reg/mem with reg,
-            0b10000000...0b10000011, // arith* imm to reg/mem (*add, adc, sub, cmp, etc...)
+            0b10000000...0b10000011, // arith* imm to reg/mem (*add, adc, sub, sbb, cmp)
             0b10000110...0b10000111, // xchg reg/mem with reg
             0b10001101, // lea
             0b11000101, // lds
@@ -466,6 +484,7 @@ const DecodeIterator = struct {
             0b00000100...0b00000101, // *add
             0b00010100...0b00010101, // *adc
             0b00101100...0b00101101, // *sub
+            0b00011100...0b00011101, // *sbb
             0b00111100...0b00111101, // *cmp
             => {
                 const w = @truncate(u1, byte0);
@@ -493,8 +512,9 @@ const DecodeIterator = struct {
                 };
             },
 
-            0b11111110...0b11111111, // push/inc reg/mem
+            0b11111110...0b11111111, // push/inc/dec reg/mem
             0b10001111, // pop reg/mem
+            0b11110110...0b11110111, // neg
             => {
                 const end = @min(self.bytes.len, self.index + 6);
                 var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
@@ -503,9 +523,10 @@ const DecodeIterator = struct {
                 return i;
             },
 
-            // push/pop/inc register oooooreg
+            // push/pop/incdec register oooooreg
             0b01010000...0b01011111, // push/pop
-            0b01000000...0b01000111, // reg
+            0b01000000...0b01000111, // inc
+            0b01001000...0b01001111, // dec
             => {
                 // w is implicitly 1
                 const reg = bitsToReg(@truncate(u3, byte0), 1);
@@ -1019,6 +1040,11 @@ test "e2e loads" {
 test "e2e adds" {
     const alctr = std.testing.allocator;
     try e2eTest("adds", alctr);
+}
+
+test "e2e subs" {
+    const alctr = std.testing.allocator;
+    try e2eTest("subs", alctr);
 }
 
 // test "e2e 0042" {
