@@ -1016,10 +1016,10 @@ test "e2e loads" {
     try e2eTest("loads", alctr);
 }
 
-// test "e2e adds" {
-//     const alctr = std.testing.allocator;
-//     try e2eTest("adds", alctr);
-// }
+test "e2e adds" {
+    const alctr = std.testing.allocator;
+    try e2eTest("adds", alctr);
+}
 
 // test "e2e 0042" {
 //     const alctr = std.testing.allocator;
