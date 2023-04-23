@@ -53,3 +53,10 @@ neg byte [bx + si + 5]
 neg word [bp + di - 10044]
 neg word [9349]
 neg byte [bp]
+
+cmp bx, cx
+cmp dh, [bp + 390]
+cmp [bp + 2], si
+cmp bl, 20
+cmp byte [bx], 34
+cmp ax, 23909
