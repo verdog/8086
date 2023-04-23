@@ -41,14 +41,23 @@ const Mnemonic = enum {
     sub,
     sbb,
     dec,
+    cmp,
     neg,
 
-    cmp,
+    mul,
+    imul,
+    div,
+    idiv,
 
     aaa,
     daa,
     aas,
     das,
+    aam,
+    aad,
+
+    cbw,
+    cwd,
 
     je,
     jl,
@@ -115,6 +124,10 @@ const Mnemonic = enum {
             0b00100111 => return .daa,
             0b00111111 => return .aas,
             0b00101111 => return .das,
+            0b11010100 => return .aam,
+            0b11010101 => return .aad,
+            0b10011000 => return .cbw,
+            0b10011001 => return .cwd,
 
             0b00101000...0b00101011, // sub reg/mem from reg to reg/mem
             0b00101100...0b00101101, // sub imm to ax
@@ -130,9 +143,6 @@ const Mnemonic = enum {
 
             0b01001000...0b01001111, // dec register
             => return .dec,
-
-            0b11110110...0b11110111, // neg reg/mem
-            => return .neg,
 
             0b01110100 => return .je,
             0b01111100 => return .jl,
@@ -212,6 +222,16 @@ const Mnemonic = enum {
                 0b00101000 => .sub,
                 0b00011000 => .sbb,
                 0b00111000 => .cmp,
+                else => .unknown,
+            },
+
+            // mul, imul, div, idiv, neg
+            0b11110110...0b11110111 => switch (bytes[1] & 0b00111000) {
+                0b00100000 => .mul,
+                0b00101000 => .imul,
+                0b00110000 => .div,
+                0b00111000 => .idiv,
+                0b00011000 => .neg,
                 else => .unknown,
             },
 
@@ -518,7 +538,7 @@ const DecodeIterator = struct {
 
             0b11111110...0b11111111, // push/inc/dec reg/mem
             0b10001111, // pop reg/mem
-            0b11110110...0b11110111, // neg
+            0b11110110...0b11110111, // mul/imul/div/idiv/neg
             => {
                 const end = @min(self.bytes.len, self.index + 6);
                 var i = Instruction.initFrom6Arith(self.bytes[self.index..end], self.index);
@@ -713,6 +733,8 @@ const DecodeIterator = struct {
             0b00100111, // daa
             0b00111111, // aas
             0b00101111, // das
+            0b10011000, // cbw
+            0b10011001, // cwd
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -720,6 +742,20 @@ const DecodeIterator = struct {
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
+                    .binary_index = self.index,
+                };
+            },
+
+            // double byte no operand instructions
+            0b11010100, // aam
+            0b11010101, // aad
+            => {
+                defer self.index += 2;
+                return Instruction{
+                    .mnemonic = Mnemonic.init(byte0),
+                    .destination = SrcDst.init(0, .{}, undefined),
+                    .source = SrcDst.init(0, .{}, undefined),
+                    .encoded_bytes = 2,
                     .binary_index = self.index,
                 };
             },
@@ -1055,6 +1091,11 @@ test "e2e adds" {
 test "e2e subs" {
     const alctr = std.testing.allocator;
     try e2eTest("subs", alctr);
+}
+
+test "e2e muls" {
+    const alctr = std.testing.allocator;
+    try e2eTest("muls", alctr);
 }
 
 // test "e2e 0042" {
