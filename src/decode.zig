@@ -112,7 +112,6 @@ const Mnemonic = enum {
     lahf,
     sahf,
 
-    rep,
     movsb,
     cmpsb,
     scasb,
@@ -248,7 +247,6 @@ const Mnemonic = enum {
             0b10011111 => return .lahf,
             0b10011110 => return .sahf,
 
-            0b11110010...0b11110011 => .rep,
             0b1010_010_0 => .movsb,
             0b1010_011_0 => .cmpsb,
             0b1010_111_0 => .scasb,
@@ -334,6 +332,15 @@ fn bitsToReg(reg: u3, w: u1) Register {
 /// Convert reg bits to segment register
 fn bitsToSegReg(reg: u2) Register {
     return @intToEnum(Register, @enumToInt(Register.es) + reg);
+}
+
+/// Convert prefix bits to Prefix
+fn bitsToPrefix(byte: u8) Prefix {
+    _ = byte;
+    // TODO
+
+    // This won't hold forever!
+    return .{ .cnst = .rep };
 }
 
 const ConstantPrefix = enum {
@@ -516,7 +523,7 @@ const InstructionParts = struct {
 
 /// The main instruction struct. Each instruction is decoded into an instance of this.
 const Instruction = struct {
-    prefixes: [2]Prefix = .{ .none, .none },
+    prefixes: [2]Prefix,
     mnemonic: Mnemonic,
     /// Destination operand(s). Some instructions only make use of 1 or 2 operands, in
     /// which case the decoder will fill the buffer with `Operand.none`.
@@ -542,6 +549,16 @@ const DecodeIterator = struct {
 
     /// Decode the next instruction in the buffer. return null at the end.
     pub fn next(self: *DecodeIterator) ?Instruction {
+        var prefixes = Prefix.init0();
+        var prefixes_len: usize = 0;
+        return self.nextWPrefix(&prefixes, prefixes_len);
+    }
+
+    fn nextWPrefix(
+        self: *DecodeIterator,
+        prefixes: *[2]Prefix,
+        prefixes_len: usize,
+    ) ?Instruction {
         if (self.index >= self.bytes.len) return null;
 
         switch (self.bytes[self.index]) {
@@ -568,6 +585,7 @@ const DecodeIterator = struct {
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = if (d_bit) ip.reg else ip.mod_rm,
                     .source = if (d_bit) ip.mod_rm else ip.reg,
@@ -591,6 +609,7 @@ const DecodeIterator = struct {
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = ip.reg,
@@ -620,6 +639,7 @@ const DecodeIterator = struct {
                 ip.mod_rm.prefixes = Prefix.init0();
 
                 var i = Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = ip.reg,
                     .source = ip.mod_rm,
@@ -658,6 +678,7 @@ const DecodeIterator = struct {
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = ip.immediate.?,
@@ -699,6 +720,7 @@ const DecodeIterator = struct {
                 const pre = Prefix.init(1, .{size});
 
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{reg}, pre),
                     .source = SrcDst.init(1, .{imm}, pre),
@@ -723,6 +745,7 @@ const DecodeIterator = struct {
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = if (has_immediate) ip.immediate.? else SrcDst.init(0, .{}, undefined), // TODO consider making this null
@@ -743,6 +766,7 @@ const DecodeIterator = struct {
 
                 defer self.index += 1;
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .reg = reg }}, Prefix.init1C(.byte)),
                     .source = SrcDst.init(0, .{}, Prefix.init1C(.byte)),
@@ -773,6 +797,7 @@ const DecodeIterator = struct {
                     SrcDst.init(1, .{.{ .imm = .{ .imm16 = 1 } }}, Prefix.init0());
 
                 var i = Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = source,
@@ -800,6 +825,7 @@ const DecodeIterator = struct {
                 const size = Prefix.init1C(if (w == 0) .byte else .word);
 
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = .mov,
                     .destination = SrcDst.init(1, .{reg_op}, size),
                     .source = SrcDst.init(1, .{imm}, size),
@@ -845,6 +871,7 @@ const DecodeIterator = struct {
                 if (not_d == 1) std.mem.swap(*const SrcDst, &dst, &src);
 
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = .mov,
                     .destination = dst.*,
                     .source = src.*,
@@ -858,6 +885,7 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 const reg = bitsToReg(@truncate(u3, self.bytes[self.index]), 1);
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = .xchg,
                     .destination = SrcDst.init(1, .{.{ .reg = .ax }}, Prefix.init1C(.word)),
                     .source = SrcDst.init(1, .{.{ .reg = reg }}, Prefix.init1C(.word)),
@@ -884,6 +912,7 @@ const DecodeIterator = struct {
                 );
 
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = jump_amount,
                     .source = SrcDst.init(0, .{}, undefined),
@@ -924,6 +953,7 @@ const DecodeIterator = struct {
                 if (mn == .out) std.mem.swap(*const SrcDst, &src_ptr, &dst_ptr);
 
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = mn,
                     .destination = dst_ptr.*,
                     .source = src_ptr.*,
@@ -946,6 +976,7 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 const reg = bitsToSegReg(@truncate(u2, self.bytes[self.index] >> 3));
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .reg = reg }}, Prefix.init1C(.word)),
                     .source = SrcDst.init(0, .{}, undefined),
@@ -966,9 +997,20 @@ const DecodeIterator = struct {
             0b00101111, // das
             0b10011000, // cbw
             0b10011001, // cwd
+            0b10100100, // movsb
+            0b10100110, // cmpsb
+            0b10101110, // scasb
+            0b10101100, // lodsb
+            0b10101010, // stosb
+            0b10100101, // movsw
+            0b10100111, // cmpsw
+            0b10101111, // scasw
+            0b10101101, // lodsw
+            0b10101011, // stosw
             => {
                 defer self.index += 1;
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
@@ -983,6 +1025,7 @@ const DecodeIterator = struct {
             => {
                 defer self.index += 2;
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = Mnemonic.init(self.bytes[self.index]),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
@@ -991,9 +1034,36 @@ const DecodeIterator = struct {
                 };
             },
 
+            // prefixes
+            0b11110010...0b11110011, // rep
+            => {
+                var blank: usize = blk: {
+                    for (prefixes, 0..) |p, i| {
+                        switch (p) {
+                            .none => break :blk i,
+                            else => {},
+                        }
+                    }
+                    // no room!
+                    std.debug.print("ERROR: no room for another instruction prefix!\n", .{});
+                    unreachable;
+                };
+
+                prefixes[blank] = bitsToPrefix(self.bytes[self.index]);
+
+                self.index += 1;
+                var prefixed = self.nextWPrefix(prefixes, prefixes_len + 1);
+                if (prefixed) |*pf| {
+                    pf.encoded_bytes += 1;
+                    pf.binary_index -= 1;
+                }
+                return prefixed;
+            },
+
             else => {
                 defer self.index += 1;
                 return Instruction{
+                    .prefixes = prefixes.*,
                     .mnemonic = .unknown,
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
@@ -1336,10 +1406,10 @@ test "e2e logic_and_bits" {
     try e2eTest("logic_and_bits", alctr);
 }
 
-// test "e2e string" {
-//     const alctr = std.testing.allocator;
-//     try e2eTest("string", alctr);
-// }
+test "e2e string" {
+    const alctr = std.testing.allocator;
+    try e2eTest("string", alctr);
+}
 
 // test "e2e 0042" {
 //     const alctr = std.testing.allocator;
