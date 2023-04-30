@@ -375,11 +375,15 @@ fn bitsToSegReg(reg: u2) Register {
 
 /// Convert prefix bits to Prefix
 fn bitsToPrefix(byte: u8) Prefix {
-    _ = byte;
-    // TODO
-
-    // This won't hold forever!
-    return .{ .cnst = .rep };
+    return switch (byte) {
+        0b11110010...0b11110011 => .{ .cnst = .rep },
+        0b11110000 => .{ .cnst = .lock },
+        0b00100110 => .{ .seg = .es },
+        0b00101110 => .{ .seg = .cs },
+        0b00110110 => .{ .seg = .ss },
+        0b00111110 => .{ .seg = .ds },
+        else => .{ .none = {} },
+    };
 }
 
 const ConstantPrefix = enum {
@@ -388,6 +392,9 @@ const ConstantPrefix = enum {
     word,
     rep,
     lock,
+};
+
+const SegmentPrefix = enum {
     cs,
     ds,
     es,
@@ -397,6 +404,7 @@ const ConstantPrefix = enum {
 const Prefix = union(enum) {
     none: void,
     cnst: ConstantPrefix,
+    seg: SegmentPrefix,
     imm: i16,
 
     // The size of the return value should match the size of the prefix fields in
@@ -459,9 +467,15 @@ const InstructionParts = struct {
     ///
     /// This function reads between 2 and 6 bytes and decodes the mod/reg/rm, disp, and
     /// immediate
-    pub fn init(bytes: []const u8, wide: bool, has_immediate: bool, immediate_is_wide: bool) InstructionParts {
+    pub fn init(
+        bytes: []const u8,
+        wide: bool,
+        has_immediate: bool,
+        immediate_is_wide: bool,
+        prefixes: *[2]Prefix,
+    ) InstructionParts {
         std.debug.assert(bytes.len >= 2);
-        const mod_rm_result = getModRm(bytes, wide);
+        const mod_rm_result = getModRm(bytes, wide, prefixes);
         const mod_rm = mod_rm_result.srcdst;
         const encoded_displacement_size = mod_rm_result.encoded_displacement_size;
 
@@ -487,10 +501,40 @@ const InstructionParts = struct {
         };
     }
 
-    fn getModRm(bytes: []const u8, wide: bool) struct {
+    const ModRmResult = struct {
         srcdst: SrcDst,
         encoded_displacement_size: u8,
-    } {
+    };
+
+    fn getModRm(bytes: []const u8, wide: bool, prefixes: *[2]Prefix) ModRmResult {
+        var result = getModRmFromBits(bytes, wide);
+        // apply any segment registers in prefixes
+        for (prefixes) |p| {
+            switch (p) {
+                .seg => {
+                    var blank: usize = blk: {
+                        for (result.srcdst.prefixes, 0..) |rp, i| {
+                            switch (rp) {
+                                .none => break :blk i,
+                                else => {},
+                            }
+                        }
+                        unreachable;
+                    };
+                    result.srcdst.prefixes[blank] = p;
+                },
+                else => {},
+            }
+        }
+
+        // TODO: originally I was going to also remove the segment prefixes from the input
+        // list too, but i went with the lazy solution of just ignoring them at print time
+        // for instruction mnemonics.
+
+        return result;
+    }
+
+    fn getModRmFromBits(bytes: []const u8, wide: bool) ModRmResult {
         const mod = @truncate(u2, bytes[1] >> 6);
         const rm = @truncate(u3, bytes[1]);
 
@@ -620,7 +664,7 @@ const DecodeIterator = struct {
                 const immediate_is_wide = false;
                 const d_bit = @truncate(u1, slice[0] >> 1) == 1;
 
-                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
@@ -644,7 +688,7 @@ const DecodeIterator = struct {
                 const has_immediate = false;
                 const immediate_is_wide = false;
 
-                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
@@ -671,7 +715,7 @@ const DecodeIterator = struct {
                 const has_immediate = false;
                 const immediate_is_wide = false;
 
-                var ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                var ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 // nasm doesn't like having explicit sizes on these instructions
@@ -713,7 +757,7 @@ const DecodeIterator = struct {
                     }
                 };
 
-                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
@@ -780,7 +824,7 @@ const DecodeIterator = struct {
                 const has_immediate = slice[0] & 0b11111110 == 0b11110110 and slice[1] & 0b00111000 == 0b00000000;
                 const immediate_is_wide = wide;
 
-                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
@@ -847,7 +891,7 @@ const DecodeIterator = struct {
                 const has_immediate = false;
                 const immediate_is_wide = false;
 
-                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide);
+                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 // the 2nd lsb determines if the src is the immediate 1 or the register
@@ -1127,6 +1171,11 @@ const DecodeIterator = struct {
 
             // prefixes
             0b11110010...0b11110011, // rep
+            0b11110000, // lock
+            0b00100110, // es
+            0b00101110, // cs
+            0b00110110, // ss
+            0b00111110, // ds
             => {
                 var blank: usize = blk: {
                     for (prefixes, 0..) |p, i| {
@@ -1224,6 +1273,7 @@ fn writeInstSrcDst(inst: Instruction, srcdst: SrcDst, labels: std.AutoHashMap(us
         switch (p) {
             .none => break,
             .cnst => |c| try writer.print("{s} ", .{@tagName(c)}),
+            .seg => |s| try writer.print("{s}:", .{@tagName(s)}),
             .imm => |i| try writer.print("{}: ", .{i}),
         };
 
@@ -1323,6 +1373,7 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
             switch (p) {
                 .none => break,
                 .cnst => |c| try writer.print("{s} ", .{@tagName(c)}),
+                .seg => {}, // segment prefixes should not apply to instructions
                 .imm => unreachable,
             };
         try writer.print("{s}", .{@tagName(inst.mnemonic)});
@@ -1510,6 +1561,11 @@ test "e2e jumps" {
 test "e2e misc" {
     const alctr = std.testing.allocator;
     try e2eTest("misc", alctr);
+}
+
+test "e2e prefixes" {
+    const alctr = std.testing.allocator;
+    try e2eTest("prefixes", alctr);
 }
 
 // test "e2e 0042" {
