@@ -73,6 +73,9 @@ const Mnemonic = enum {
     cbw,
     cwd,
 
+    call,
+    jmp,
+    ret,
     je,
     jl,
     jle,
@@ -185,6 +188,10 @@ const Mnemonic = enum {
             0b10101000...0b10101001, // test with ax
             => return .@"test",
 
+            0b11000011 => return .ret, // within segment
+            0b11000010 => return .ret, // within segment
+            0b11001011 => return .ret, // inter segment
+            0b11001010 => return .ret, // inter segment
             0b01110100 => return .je,
             0b01111100 => return .jl,
             0b01111110 => return .jle,
@@ -305,10 +312,14 @@ const Mnemonic = enum {
             },
 
             // push, inc, dec reg/mem
+            // call, indirect jump
             0b11111110...0b11111111 => switch (bytes[1] & 0b00111000) {
                 0b00000000 => .inc,
                 0b00001000 => .dec,
                 0b00110000 => .push,
+                0b00010000 => .call,
+                0b00100000 => .jmp,
+                0b00101000 => .jmp,
                 else => .unknown,
             },
 
@@ -775,6 +786,30 @@ const DecodeIterator = struct {
                 };
             },
 
+            // ret with sp offset
+            0b11000010,
+            0b11001010,
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                const slice = self.bytes[self.index..end];
+
+                const imm = (@as(i16, slice[2]) << 8) | slice[1];
+                const imm_srcdst = SrcDst.init(1, .{.{ .imm = .{ .imm16 = imm } }}, .{ .none, .none });
+
+                defer self.index += 3;
+
+                var i = Instruction{
+                    .prefixes = prefixes.*,
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = SrcDst.init(0, .{}, undefined),
+                    .source = imm_srcdst,
+                    .encoded_bytes = 3,
+                    .binary_index = self.index,
+                };
+
+                return i;
+            },
+
             0b11010000...0b11010011, // shl/shr/sar/rol/ror/rcl/rcr
             => {
                 const end = @min(self.bytes.len, self.index + 6);
@@ -1007,6 +1042,8 @@ const DecodeIterator = struct {
             0b10101111, // scasw
             0b10101101, // lodsw
             0b10101011, // stosw
+            0b11000011, // ret (within segment)
+            0b11001011, // ret (intersegment)
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -1409,6 +1446,11 @@ test "e2e logic_and_bits" {
 test "e2e string" {
     const alctr = std.testing.allocator;
     try e2eTest("string", alctr);
+}
+
+test "e2e jumps" {
+    const alctr = std.testing.allocator;
+    try e2eTest("jumps", alctr);
 }
 
 // test "e2e 0042" {
