@@ -126,6 +126,20 @@ const Mnemonic = enum {
     lodsw,
     stosw,
 
+    int,
+    int3,
+    into,
+    iret,
+    clc,
+    cmc,
+    stc,
+    cld,
+    std,
+    cli,
+    sti,
+    hlt,
+    wait,
+
     unknown,
 
     pub fn init(byte: u8) Mnemonic {
@@ -264,6 +278,20 @@ const Mnemonic = enum {
             0b1010_111_1 => .scasw,
             0b1010_110_1 => .lodsw,
             0b1010_101_1 => .stosw,
+
+            0b11001101 => .int,
+            0b11001100 => .int3,
+            0b11001110 => .into,
+            0b11001111 => .iret,
+            0b11111000 => .clc,
+            0b11110101 => .cmc,
+            0b11111001 => .stc,
+            0b11111100 => .cld,
+            0b11111101 => .std,
+            0b11111010 => .cli,
+            0b11111011 => .sti,
+            0b11110100 => .hlt,
+            0b10011011 => .wait,
 
             else => return .unknown,
         };
@@ -956,6 +984,20 @@ const DecodeIterator = struct {
                 };
             },
 
+            // int
+            0b11001101 => {
+                defer self.index += 2;
+                const byte1 = self.bytes[self.index + 1];
+                return Instruction{
+                    .prefixes = prefixes.*,
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .destination = SrcDst.init(1, .{.{ .imm = .{ .imm16 = @as(i16, byte1) } }}, .{ .none, .none }),
+                    .source = SrcDst.init(0, .{}, undefined),
+                    .encoded_bytes = 2,
+                    .binary_index = self.index,
+                };
+            },
+
             // in/out
             0b11100100...0b11100101,
             0b11101100...0b11101101,
@@ -1044,6 +1086,18 @@ const DecodeIterator = struct {
             0b10101011, // stosw
             0b11000011, // ret (within segment)
             0b11001011, // ret (intersegment)
+            0b11001100, // int3,
+            0b11001110, // into,
+            0b11001111, // iret,
+            0b11111000, // clc,
+            0b11110101, // cmc,
+            0b11111001, // stc,
+            0b11111100, // cld,
+            0b11111101, // std,
+            0b11111010, // cli,
+            0b11111011, // sti,
+            0b11110100, // hlt,
+            0b10011011, // wait,
             => {
                 defer self.index += 1;
                 return Instruction{
@@ -1451,6 +1505,11 @@ test "e2e string" {
 test "e2e jumps" {
     const alctr = std.testing.allocator;
     try e2eTest("jumps", alctr);
+}
+
+test "e2e misc" {
+    const alctr = std.testing.allocator;
+    try e2eTest("misc", alctr);
 }
 
 // test "e2e 0042" {
