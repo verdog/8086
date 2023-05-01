@@ -74,8 +74,11 @@ const Mnemonic = enum {
     cwd,
 
     call,
+    @"call far",
     jmp,
+    @"jmp far",
     ret,
+    retf,
     je,
     jl,
     jle,
@@ -149,6 +152,7 @@ const Mnemonic = enum {
             0b11000110...0b11000111, // mov imm to reg/mem
             0b10110000...0b10111111, // mov imm to reg
             0b10100000...0b10100011, // mov ax/mem to ax/mem
+            0b10001100, // mov segreg to reg16/mem16
             => return .mov,
 
             0b00000000...0b00000011, // add reg/mem with reg to reg/mem
@@ -204,8 +208,13 @@ const Mnemonic = enum {
 
             0b11000011 => return .ret, // within segment
             0b11000010 => return .ret, // within segment
-            0b11001011 => return .ret, // inter segment
-            0b11001010 => return .ret, // inter segment
+            0b11001011 => return .retf, // inter segment
+            0b11001010 => return .retf, // inter segment
+            0b10011010 => return .call, // inter segment
+            0b11101010 => return .jmp, // inter segment
+            0b11101001 => return .jmp, // jmp direct within segment
+            0b11101000 => return .call, // call direct within segment
+            0b11101011 => return .jmp, // jmp direct withing segment - short
             0b01110100 => return .je,
             0b01111100 => return .jl,
             0b01111110 => return .jle,
@@ -346,8 +355,9 @@ const Mnemonic = enum {
                 0b00001000 => .dec,
                 0b00110000 => .push,
                 0b00010000 => .call,
+                0b00011000 => .@"call far",
                 0b00100000 => .jmp,
-                0b00101000 => .jmp,
+                0b00101000 => .@"jmp far",
                 else => .unknown,
             },
 
@@ -488,7 +498,11 @@ const InstructionParts = struct {
         else
             0;
 
-        const reg = SrcDst.init(1, .{.{ .reg = bitsToReg(@truncate(u3, bytes[1] >> 3), @boolToInt(wide)) }}, Prefix.init0());
+        const reg = SrcDst.init(
+            1,
+            .{.{ .reg = bitsToReg(@truncate(u3, bytes[1] >> 3), @boolToInt(wide)) }},
+            Prefix.init0(),
+        );
 
         const encoded_bytes = 2 + encoded_displacement_size + encoded_immediate_size;
         std.debug.assert(encoded_bytes <= 6);
@@ -672,6 +686,37 @@ const DecodeIterator = struct {
                     .mnemonic = Mnemonic.init2(slice[0..2].*),
                     .destination = if (d_bit) ip.reg else ip.mod_rm,
                     .source = if (d_bit) ip.mod_rm else ip.reg,
+                    .encoded_bytes = ip.encoded_bytes,
+                    .binary_index = self.index,
+                };
+
+                return i;
+            },
+
+            0b10001100, // mov segreg to reg16/mem16
+            => {
+                const end = @min(self.bytes.len, self.index + 6);
+                const slice = self.bytes[self.index..end];
+
+                const wide = true;
+                const has_immediate = false;
+                const immediate_is_wide = false;
+
+                var ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
+                defer self.index += ip.encoded_bytes;
+
+                // replace parsed register with seg reg
+                ip.reg = SrcDst.init(
+                    1,
+                    .{.{ .reg = bitsToSegReg(@truncate(u2, self.bytes[self.index + 1] >> 3)) }},
+                    ip.reg.prefixes,
+                );
+
+                var i = Instruction{
+                    .prefixes = prefixes.*,
+                    .mnemonic = Mnemonic.init(slice[0]),
+                    .destination = ip.mod_rm,
+                    .source = ip.reg,
                     .encoded_bytes = ip.encoded_bytes,
                     .binary_index = self.index,
                 };
@@ -1024,6 +1069,58 @@ const DecodeIterator = struct {
                     .destination = jump_amount,
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 2,
+                    .binary_index = self.index,
+                };
+            },
+
+            0b10011010, // direct intersegment call
+            0b11101010, // direct intersegment jump
+            => {
+                defer self.index += 5;
+                const ip = (@as(i16, self.bytes[self.index + 2]) << 8) | self.bytes[self.index + 1];
+                const cs = (@as(i16, self.bytes[self.index + 4]) << 8) | self.bytes[self.index + 3];
+                const ip_sd = SrcDst.init(1, .{.{ .imm = .{ .imm16 = ip } }}, .{ .{ .imm = cs }, .none });
+                return Instruction{
+                    .prefixes = prefixes.*,
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .destination = ip_sd,
+                    .source = SrcDst.init(0, .{}, undefined),
+                    .encoded_bytes = 5,
+                    .binary_index = self.index,
+                };
+            },
+
+            0b11101001, // jmp direct within segment
+            0b11101000, // call direct within segment
+            => {
+                defer self.index += 3;
+                var ip = (@as(i16, self.bytes[self.index + 2]) << 8) | self.bytes[self.index + 1];
+
+                // within segment jmps/calls are relative
+                ip += @truncate(i16, @bitCast(i64, self.index)) + 3;
+
+                const ip_sd = SrcDst.init(1, .{.{ .imm = .{ .imm16 = ip } }}, .{ .none, .none });
+                return Instruction{
+                    .prefixes = prefixes.*,
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .destination = ip_sd,
+                    .source = SrcDst.init(0, .{}, undefined),
+                    .encoded_bytes = 3,
+                    .binary_index = self.index,
+                };
+            },
+
+            0b11101011, // jmp direct withing segment - short
+            => {
+                defer self.index += 2;
+                const ip = @bitCast(i8, self.bytes[self.index + 1]);
+                const ip_sd = SrcDst.init(1, .{.{ .imm = .{ .imm16 = ip } }}, .{ .none, .none });
+                return Instruction{
+                    .prefixes = prefixes.*,
+                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .destination = ip_sd,
+                    .source = SrcDst.init(0, .{}, undefined),
+                    .encoded_bytes = 1,
                     .binary_index = self.index,
                 };
             },
@@ -1568,10 +1665,15 @@ test "e2e prefixes" {
     try e2eTest("prefixes", alctr);
 }
 
-// test "e2e 0042" {
-//     const alctr = std.testing.allocator;
-//     try e2eTest("listing_0042_completionist_decode", alctr);
-// }
+test "e2e evil" {
+    const alctr = std.testing.allocator;
+    try e2eTest("evil", alctr);
+}
+
+test "e2e 0042" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0042_completionist_decode", alctr);
+}
 
 const std = @import("std");
 const expectEq = std.testing.expectEqual;
