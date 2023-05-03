@@ -152,7 +152,8 @@ const Mnemonic = enum {
             0b11000110...0b11000111, // mov imm to reg/mem
             0b10110000...0b10111111, // mov imm to reg
             0b10100000...0b10100011, // mov ax/mem to ax/mem
-            0b10001100, // mov segreg to reg16/mem16
+            0b10001110, // reg/mem to segreg
+            0b10001100, // segreg to reg/mem
             => return .mov,
 
             0b00000000...0b00000011, // add reg/mem with reg to reg/mem
@@ -693,7 +694,8 @@ const DecodeIterator = struct {
                 return i;
             },
 
-            0b10001100, // mov segreg to reg16/mem16
+            0b10001110, // reg/mem to segreg
+            0b10001100, // segreg to reg/mem
             => {
                 const end = @min(self.bytes.len, self.index + 6);
                 const slice = self.bytes[self.index..end];
@@ -701,6 +703,7 @@ const DecodeIterator = struct {
                 const wide = true;
                 const has_immediate = false;
                 const immediate_is_wide = false;
+                const d_bit = @truncate(u1, slice[0] >> 1) == 1;
 
                 var ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
@@ -714,9 +717,9 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(slice[0]),
-                    .destination = ip.mod_rm,
-                    .source = ip.reg,
+                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .destination = if (d_bit) ip.reg else ip.mod_rm,
+                    .source = if (d_bit) ip.mod_rm else ip.reg,
                     .encoded_bytes = ip.encoded_bytes,
                     .binary_index = self.index,
                 };
@@ -802,7 +805,7 @@ const DecodeIterator = struct {
                     }
                 };
 
-                const ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
+                var ip = InstructionParts.init(slice, wide, has_immediate, immediate_is_wide, prefixes);
                 defer self.index += ip.encoded_bytes;
 
                 var i = Instruction{
@@ -1673,6 +1676,21 @@ test "e2e evil" {
 test "e2e 0042" {
     const alctr = std.testing.allocator;
     try e2eTest("listing_0042_completionist_decode", alctr);
+}
+
+test "e2e 0043" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0043_immediate_movs", alctr);
+}
+
+test "e2e 0044" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0044_register_movs", alctr);
+}
+
+test "e2e 0045" {
+    const alctr = std.testing.allocator;
+    try e2eTest("listing_0045_challenge_register_movs", alctr);
 }
 
 const std = @import("std");
