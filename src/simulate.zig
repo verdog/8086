@@ -97,7 +97,13 @@ pub fn simulateAndPrintFile(filename: []u8, writer: anytype, alctr: std.mem.Allo
                     }
                 };
 
+                const old = data.getRegister(dst);
                 data.putRegister(dst, @bitCast(u16, src));
+                try txt.writeInst(inst, null, writer);
+                try writer.print(
+                    " ; {s}: 0x{x:0>4} -> 0x{x:0>4}\n",
+                    .{ @tagName(dst), old, data.getRegister(dst) },
+                );
             },
             else => {
                 std.debug.print("unimplemented: {s}\n", .{@tagName(inst.mnemonic)});
@@ -106,7 +112,7 @@ pub fn simulateAndPrintFile(filename: []u8, writer: anytype, alctr: std.mem.Allo
         }
     }
 
-    try writer.print("final register values:\n", .{});
+    try writer.print("\nfinal register values:\n", .{});
     try writer.print("ax: 0x{0x:0>4} ({0})\n", .{data.ax});
     try writer.print("cx: 0x{0x:0>4} ({0})\n", .{data.cx});
     try writer.print("dx: 0x{0x:0>4} ({0})\n", .{data.dx});
@@ -155,6 +161,7 @@ test "Data.putRegister: handle 8 bit registers" {
 const std = @import("std");
 const dec = @import("decode.zig");
 const nms = @import("names.zig");
+const txt = @import("text.zig");
 
 const expectEq = std.testing.expectEqual;
 const expect = std.testing.expect;

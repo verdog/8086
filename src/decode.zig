@@ -11,7 +11,7 @@ const Immediate = union(enum) {
 /// source or destination (see table 4-20 and the Instruction struct). To simplify
 /// instruction representation, we assume every source or destination involves 3 operands.
 /// When they in reality involve less, we fill in the buffer with `none`s.
-const Operand = union(enum) {
+pub const Operand = union(enum) {
     none: void,
     reg: nms.Register,
     imm: Immediate,
@@ -306,7 +306,7 @@ const Prefix = union(enum) {
 };
 
 /// Source or destination for an instruction.
-const SrcDst = struct {
+pub const SrcDst = struct {
     op0: ?Operand,
     op1: ?Operand,
     op2: ?Operand,
@@ -489,7 +489,7 @@ const InstructionParts = struct {
 };
 
 /// The main instruction struct. Each instruction is decoded into an instance of this.
-const Instruction = struct {
+pub const Instruction = struct {
     prefixes: [2]Prefix,
     mnemonic: nms.Mnemonic,
     /// Destination operand(s). Some instructions only make use of 1 or 2 operands, in
@@ -1232,54 +1232,6 @@ fn bitsToSrcDst(reg_or_mem: u3, mod: u2, w: u1, imm_value: Operand) SrcDst {
     };
 }
 
-/// Interpret `ops` as the source/destination operands of some instruction. Compose the
-/// operands into a single string that is appropriate for the source/destination of some
-/// instruction and write the string to `writer`.
-///
-/// TODO refactor this
-fn writeInstSrcDst(inst: Instruction, srcdst: SrcDst, labels: std.AutoHashMap(usize, usize), writer: anytype) !void {
-    for (srcdst.prefixes) |p|
-        switch (p) {
-            .none => break,
-            .cnst => |c| try writer.print("{s} ", .{@tagName(c)}),
-            .seg => |s| try writer.print("{s}:", .{@tagName(s)}),
-            .imm => |i| try writer.print("{}: ", .{i}),
-        };
-
-    if (srcdst.numOps() > 1)
-        try writer.print("[", .{});
-
-    const ops = [3]?Operand{ srcdst.op0, srcdst.op1, srcdst.op2 };
-
-    for (ops, 0..) |mop, i| {
-        if (mop == null) break;
-        const op = mop.?;
-        switch (op) {
-            .none => {},
-            .reg => |r| {
-                if (i > 0) try writer.print("+", .{});
-                try writer.print("{s}", .{@tagName(r)});
-            },
-            .imm => |ival| {
-                switch (ival) {
-                    .imm16 => |pval| {
-                        if (i > 0) try writer.print("+", .{});
-                        // TODO print in hex with dec in comment
-                        try writer.print("{}", .{pval});
-                    },
-                    .inst_addr => |rel_addr| {
-                        const abs_addr = @intCast(usize, @intCast(i64, inst.binary_index) + rel_addr + 2);
-                        try writer.print("L{?}", .{labels.get(abs_addr)});
-                    },
-                }
-            },
-        }
-    }
-
-    if (srcdst.numOps() > 1)
-        try writer.print("]", .{});
-}
-
 /// Given `filename`, interpret it as 8086 machine code and write the corresponding 8086
 /// assembly to `writer`.
 pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
@@ -1338,26 +1290,7 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
         }
 
         // instruction
-        for (inst.prefixes) |p|
-            switch (p) {
-                .none => break,
-                .cnst => |c| try writer.print("{s} ", .{@tagName(c)}),
-                .seg => {}, // segment prefixes should not apply to instructions
-                .imm => unreachable,
-            };
-        try writer.print("{s}", .{@tagName(inst.mnemonic)});
-        const has_dest = inst.destination.numOps() > 0;
-        const has_src = inst.source.numOps() > 0;
-        if (has_dest) {
-            try writer.print(" ", .{});
-            try writeInstSrcDst(inst, inst.destination, labels, writer);
-        }
-        if (has_dest and has_src)
-            try writer.print(",", .{});
-        if (has_src) {
-            try writer.print(" ", .{});
-            try writeInstSrcDst(inst, inst.source, labels, writer);
-        }
+        try txt.writeInst(inst, labels, writer);
         try writer.print("\n\n", .{});
     }
 }
@@ -1564,6 +1497,7 @@ test "e2e 0045" {
 
 const std = @import("std");
 const nms = @import("names.zig");
+const txt = @import("text.zig");
 
 const expectEq = std.testing.expectEqual;
 const expect = std.testing.expect;
