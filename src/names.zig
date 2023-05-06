@@ -5,9 +5,9 @@
 /// bit to make a number that maps to an enum value. see bitsToReg.
 pub const Register = enum(u8) {
     // zig fmt: off
-    al, cl, dl, bl, // a, b, c, d low. (byte)
-    ah, ch, dh, bh, // a, b, c, d high. (byte)
-    ax, cx, dx, bx, // a, b, c, d wide. (word, aka two bytes)
+    al, cl, dl, bl, // a, c, d, b low. (byte)
+    ah, ch, dh, bh, // a, c, d, b high. (byte)
+    ax, cx, dx, bx, // a, c, d, b wide. (word, aka two bytes)
     sp, bp, si, di, // stack pointer, base pointer, source and destination. (word)
     es, cs, ss, ds, // segment registers
     // zig fmt: on

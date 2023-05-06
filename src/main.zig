@@ -16,6 +16,8 @@ pub fn main() !void {
 }
 
 test {
+    // it makes sense to run decode tests before simulate tests, since the simulator
+    // depends on correct results from the decoder.
     _ = @import("decode.zig");
     _ = @import("simulate.zig");
     _ = @import("names.zig");
