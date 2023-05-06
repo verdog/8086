@@ -21,6 +21,8 @@ test {
     _ = @import("decode.zig");
     _ = @import("simulate.zig");
     _ = @import("names.zig");
+    _ = @import("text.zig");
+    _ = @import("test.zig");
 }
 
 const std = @import("std");

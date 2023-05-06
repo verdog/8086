@@ -1317,187 +1317,130 @@ test "bitsToReg" {
     try expectEq(nms.Register.di, bitsToReg(0b111, 1));
 }
 
-/// Run an end to end decoder test. Given a "basename" that represents a file,
-/// 1. Compile ./asm/<basename>.asm to a ./testfs/<basename> binary using nasm
-/// 2. Decode the ./asm/<basename> binary with our decoder and write the decoded assembly
-///    to ./testfs/<basename>.asm
-/// 3. Compile the ./testfs/<basename>.asm to a ./testfs/<basename>2 binary using nasm
-/// 4. Assert that the ./testfs/<basename> and ./testfs/<basename>2 binaries are identical
-fn e2eTest(comptime basename: []const u8, alctr: std.mem.Allocator) !void {
-    // compile reference asm
-    {
-        const res = try std.ChildProcess.exec(.{
-            .allocator = alctr,
-            .argv = &.{ "nasm", "./asm/" ++ basename ++ ".asm", "-o", "./testfs/" ++ basename },
-        });
-        defer alctr.free(res.stdout);
-        defer alctr.free(res.stderr);
-
-        errdefer std.debug.print("stdout:\n{s}\n", .{res.stdout});
-        errdefer std.debug.print("stderr:\n{s}\n", .{res.stderr});
-        try expectEq(@as(u8, res.term.Exited), 0);
-    }
-
-    // decode binary
-    {
-        const decoded = try std.fs.cwd().createFile("./testfs/" ++ basename ++ ".asm", .{});
-        defer decoded.close();
-        try decodeAndPrintFile("./testfs/" ++ basename, decoded.writer(), alctr);
-    }
-
-    // compile decoded asm
-    {
-        const res = try std.ChildProcess.exec(.{
-            .allocator = alctr,
-            .argv = &.{ "nasm", "./testfs/" ++ basename ++ ".asm", "-o", "./testfs/" ++ basename ++ "2" },
-        });
-        defer alctr.free(res.stdout);
-        defer alctr.free(res.stderr);
-
-        errdefer std.debug.print("stdout:\n{s}\n", .{res.stdout});
-        errdefer std.debug.print("stderr:\n{s}\n", .{res.stderr});
-        try expectEq(@as(u8, res.term.Exited), 0);
-    }
-
-    // ensure they are identical
-    {
-        const ref = try std.fs.cwd().openFile("./testfs/" ++ basename, .{});
-        defer ref.close();
-        const ours = try std.fs.cwd().openFile("./testfs/" ++ basename ++ "2", .{});
-        defer ours.close();
-
-        const ref_data = try ref.readToEndAlloc(alctr, 1024 * 1024);
-        defer alctr.free(ref_data);
-        const ours_data = try ours.readToEndAlloc(alctr, 1024 * 1024);
-        defer alctr.free(ours_data);
-
-        try std.testing.expectEqualSlices(u8, ref_data, ours_data);
-    }
-}
-
 test "e2e 0037" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0037_single_register_mov", alctr);
+    try tst.decodeEndToEnd("listing_0037_single_register_mov", alctr);
 }
 
 test "e2e 0038" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0038_many_register_mov", alctr);
+    try tst.decodeEndToEnd("listing_0038_many_register_mov", alctr);
 }
 
 test "e2e 0039" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0039_more_movs", alctr);
+    try tst.decodeEndToEnd("listing_0039_more_movs", alctr);
 }
 
 test "e2e 0040" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0040_challenge_movs", alctr);
+    try tst.decodeEndToEnd("listing_0040_challenge_movs", alctr);
 }
 
 test "e2e 0040 positive" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0040_challenge_movs_positive", alctr);
+    try tst.decodeEndToEnd("listing_0040_challenge_movs_positive", alctr);
 }
 
 test "e2e negative displacement" {
     const alctr = std.testing.allocator;
-    try e2eTest("negative_mov", alctr);
+    try tst.decodeEndToEnd("negative_mov", alctr);
 }
 
 test "e2e 0041" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0041_add_sub_cmp_jnz", alctr);
+    try tst.decodeEndToEnd("listing_0041_add_sub_cmp_jnz", alctr);
 }
 
 test "e2e push pop" {
     const alctr = std.testing.allocator;
-    try e2eTest("push_pop", alctr);
+    try tst.decodeEndToEnd("push_pop", alctr);
 }
 
 test "e2e xchg" {
     const alctr = std.testing.allocator;
-    try e2eTest("xchg", alctr);
+    try tst.decodeEndToEnd("xchg", alctr);
 }
 
 test "e2e in out" {
     const alctr = std.testing.allocator;
-    try e2eTest("in_out", alctr);
+    try tst.decodeEndToEnd("in_out", alctr);
 }
 
 test "e2e loads" {
     const alctr = std.testing.allocator;
-    try e2eTest("loads", alctr);
+    try tst.decodeEndToEnd("loads", alctr);
 }
 
 test "e2e adds" {
     const alctr = std.testing.allocator;
-    try e2eTest("adds", alctr);
+    try tst.decodeEndToEnd("adds", alctr);
 }
 
 test "e2e subs" {
     const alctr = std.testing.allocator;
-    try e2eTest("subs", alctr);
+    try tst.decodeEndToEnd("subs", alctr);
 }
 
 test "e2e muls" {
     const alctr = std.testing.allocator;
-    try e2eTest("muls", alctr);
+    try tst.decodeEndToEnd("muls", alctr);
 }
 
 test "e2e logic_and_bits" {
     const alctr = std.testing.allocator;
-    try e2eTest("logic_and_bits", alctr);
+    try tst.decodeEndToEnd("logic_and_bits", alctr);
 }
 
 test "e2e string" {
     const alctr = std.testing.allocator;
-    try e2eTest("string", alctr);
+    try tst.decodeEndToEnd("string", alctr);
 }
 
 test "e2e jumps" {
     const alctr = std.testing.allocator;
-    try e2eTest("jumps", alctr);
+    try tst.decodeEndToEnd("jumps", alctr);
 }
 
 test "e2e misc" {
     const alctr = std.testing.allocator;
-    try e2eTest("misc", alctr);
+    try tst.decodeEndToEnd("misc", alctr);
 }
 
 test "e2e prefixes" {
     const alctr = std.testing.allocator;
-    try e2eTest("prefixes", alctr);
+    try tst.decodeEndToEnd("prefixes", alctr);
 }
 
 test "e2e evil" {
     const alctr = std.testing.allocator;
-    try e2eTest("evil", alctr);
+    try tst.decodeEndToEnd("evil", alctr);
 }
 
 test "e2e 0042" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0042_completionist_decode", alctr);
+    try tst.decodeEndToEnd("listing_0042_completionist_decode", alctr);
 }
 
 test "e2e 0043" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0043_immediate_movs", alctr);
+    try tst.decodeEndToEnd("listing_0043_immediate_movs", alctr);
 }
 
 test "e2e 0044" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0044_register_movs", alctr);
+    try tst.decodeEndToEnd("listing_0044_register_movs", alctr);
 }
 
 test "e2e 0045" {
     const alctr = std.testing.allocator;
-    try e2eTest("listing_0045_challenge_register_movs", alctr);
+    try tst.decodeEndToEnd("listing_0045_challenge_register_movs", alctr);
 }
 
 const std = @import("std");
 const nms = @import("names.zig");
 const txt = @import("text.zig");
+const tst = @import("test.zig");
 
 const expectEq = std.testing.expectEqual;
 const expect = std.testing.expect;
