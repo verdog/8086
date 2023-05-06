@@ -53,7 +53,7 @@ const Data = struct {
     }
 };
 
-pub fn simulateAndPrintFile(filename: []u8, writer: anytype, alctr: std.mem.Allocator) !void {
+pub fn simulateAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
 
@@ -158,10 +158,16 @@ test "Data.putRegister: handle 8 bit registers" {
     try expectEq(data.getRegister(.bx), 0x9878);
 }
 
+test "e2e listing_0043_immediate_movs" {
+    const alctr = std.testing.allocator;
+    try tst.simulateEndToEnd("listing_0043_immediate_movs", alctr);
+}
+
 const std = @import("std");
 const dec = @import("decode.zig");
 const nms = @import("names.zig");
 const txt = @import("text.zig");
+const tst = @import("test.zig");
 
 const expectEq = std.testing.expectEqual;
 const expect = std.testing.expect;
