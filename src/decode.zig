@@ -1,18 +1,5 @@
 //! decoding machine language into assembly
 
-/// 8086 register names. the order of the values in this enum has been chosen to match
-/// table 4-9 in the 8086 users manual (page 263). the reg field is combined with the w
-/// bit to make a number that maps to an enum value. see bitsToReg.
-const Register = enum(u8) {
-    // zig fmt: off
-    al, cl, dl, bl, // a, b, c, d low. (byte)
-    ah, ch, dh, bh, // a, b, c, d high. (byte)
-    ax, cx, dx, bx, // a, b, c, d wide. (word, aka two bytes)
-    sp, bp, si, di, // stack pointer, base pointer, source and destination. (word)
-    es, cs, ss, ds, // segment registers
-    // zig fmt: on
-};
-
 /// Instruction encoded immediate value.
 /// TODO fold this up into Operand
 const Immediate = union(enum) {
@@ -26,362 +13,23 @@ const Immediate = union(enum) {
 /// When they in reality involve less, we fill in the buffer with `none`s.
 const Operand = union(enum) {
     none: void,
-    reg: Register,
+    reg: nms.Register,
     imm: Immediate,
 };
 
-/// Assembly mnemonic. These should match the assembly language exactly, as the printing
-/// logic uses @tagName to get the strings at print time.
-const Mnemonic = enum {
-    mov,
-
-    add,
-    adc,
-    inc,
-
-    sub,
-    sbb,
-    dec,
-
-    @"and",
-    @"or",
-    xor,
-    cmp,
-    @"test",
-
-    mul,
-    imul,
-    div,
-    idiv,
-    neg,
-    not,
-    shl,
-    shr,
-    sar,
-    rol,
-    ror,
-    rcl,
-    rcr,
-
-    aaa,
-    daa,
-    aas,
-    das,
-    aam,
-    aad,
-
-    cbw,
-    cwd,
-
-    call,
-    @"call far",
-    jmp,
-    @"jmp far",
-    ret,
-    retf,
-    je,
-    jl,
-    jle,
-    jb,
-    jbe,
-    jp,
-    jo,
-    js,
-    jne,
-    jnl,
-    jg,
-    jnb,
-    jnbe,
-    jnp,
-    jno,
-    jns,
-    loop,
-    loopz,
-    loopnz,
-    jcxz,
-
-    push,
-    pop,
-    pushf,
-    popf,
-
-    xchg,
-
-    in,
-    out,
-
-    xlat,
-
-    lea,
-    lds,
-    les,
-    lahf,
-    sahf,
-
-    movsb,
-    cmpsb,
-    scasb,
-    lodsb,
-    stosb,
-    movsw,
-    cmpsw,
-    scasw,
-    lodsw,
-    stosw,
-
-    int,
-    int3,
-    into,
-    iret,
-    clc,
-    cmc,
-    stc,
-    cld,
-    std,
-    cli,
-    sti,
-    hlt,
-    wait,
-
-    unknown,
-
-    pub fn init(byte: u8) Mnemonic {
-        // see table 4-12
-        return switch (byte) {
-            0b10001000...0b10001011, // mov reg/mem to/from reg
-            0b11000110...0b11000111, // mov imm to reg/mem
-            0b10110000...0b10111111, // mov imm to reg
-            0b10100000...0b10100011, // mov ax/mem to ax/mem
-            0b10001110, // reg/mem to segreg
-            0b10001100, // segreg to reg/mem
-            => return .mov,
-
-            0b00000000...0b00000011, // add reg/mem with reg to reg/mem
-            0b00000100...0b00000101, // add imm to ax
-            => return .add,
-
-            0b00010000...0b00010011, // adc reg/mem with reg to reg/mem
-            0b00010100...0b00010101, // add imm to ax
-            => return .adc,
-
-            0b01000000...0b01000111, // inc register
-            => return .inc,
-
-            0b00110111 => return .aaa,
-            0b00100111 => return .daa,
-            0b00111111 => return .aas,
-            0b00101111 => return .das,
-            0b11010100 => return .aam,
-            0b11010101 => return .aad,
-            0b10011000 => return .cbw,
-            0b10011001 => return .cwd,
-
-            0b00101000...0b00101011, // sub reg/mem from reg to reg/mem
-            0b00101100...0b00101101, // sub imm to ax
-            => return .sub,
-
-            0b00011000...0b00011011, // sbb reg/mem from reg to reg/mem
-            0b00011100...0b00011101, // sbb imm to ax
-            => return .sbb,
-
-            0b00111000...0b00111011, // cmp reg/mem and reg
-            0b00111100...0b00111101, // cmp imm with ax
-            => return .cmp,
-
-            0b01001000...0b01001111, // dec register
-            => return .dec,
-
-            0b00100000...0b00100011, // and reg/mem and reg
-            0b00100100...0b00100101, // and imm with ax
-            => return .@"and",
-
-            0b00001000...0b00001011, // or reg/mem with reg
-            0b00001100...0b00001101, // or imm with ax
-            => return .@"or",
-
-            0b00110000...0b00110011, // xor reg/mem with reg
-            0b00110100...0b00110101, // xor imm with ax
-            => return .xor,
-
-            0b10000100...0b10000101, // test
-            0b10101000...0b10101001, // test with ax
-            => return .@"test",
-
-            0b11000011 => return .ret, // within segment
-            0b11000010 => return .ret, // within segment
-            0b11001011 => return .retf, // inter segment
-            0b11001010 => return .retf, // inter segment
-            0b10011010 => return .call, // inter segment
-            0b11101010 => return .jmp, // inter segment
-            0b11101001 => return .jmp, // jmp direct within segment
-            0b11101000 => return .call, // call direct within segment
-            0b11101011 => return .jmp, // jmp direct withing segment - short
-            0b01110100 => return .je,
-            0b01111100 => return .jl,
-            0b01111110 => return .jle,
-            0b01110010 => return .jb,
-            0b01110110 => return .jbe,
-            0b01111010 => return .jp,
-            0b01110000 => return .jo,
-            0b01111000 => return .js,
-            0b01110101 => return .jne,
-            0b01111101 => return .jnl,
-            0b01111111 => return .jg,
-            0b01110011 => return .jnb,
-            0b01110111 => return .jnbe,
-            0b01111011 => return .jnp,
-            0b01110001 => return .jno,
-            0b01111001 => return .jns,
-            0b11100010 => return .loop,
-            0b11100001 => return .loopz,
-            0b11100000 => return .loopnz,
-            0b11100011 => return .jcxz,
-
-            0b01010000...0b01010111,
-            0b00000110,
-            0b00001110,
-            0b00010110,
-            0b00011110,
-            0b00100110,
-            0b00101110,
-            0b00110110,
-            0b00111110,
-            => return .push,
-
-            0b10001111,
-            0b01011000...0b01011111,
-            0b00000111,
-            0b00001111,
-            0b00010111,
-            0b00011111,
-            => return .pop,
-
-            0b10011100 => return .pushf,
-            0b10011101 => return .popf,
-
-            0b10000110...0b10000111,
-            0b10010000...0b10010111,
-            => return .xchg,
-
-            0b11100100...0b11100101,
-            0b11101100...0b11101101,
-            => return .in,
-
-            0b11100110...0b11100111,
-            0b11101110...0b11101111,
-            => return .out,
-
-            0b11010111 => return .xlat,
-            0b10001101 => return .lea,
-            0b11000101 => return .lds,
-            0b11000100 => return .les,
-            0b10011111 => return .lahf,
-            0b10011110 => return .sahf,
-
-            0b1010_010_0 => .movsb,
-            0b1010_011_0 => .cmpsb,
-            0b1010_111_0 => .scasb,
-            0b1010_110_0 => .lodsb,
-            0b1010_101_0 => .stosb,
-            0b1010_010_1 => .movsw,
-            0b1010_011_1 => .cmpsw,
-            0b1010_111_1 => .scasw,
-            0b1010_110_1 => .lodsw,
-            0b1010_101_1 => .stosw,
-
-            0b11001101 => .int,
-            0b11001100 => .int3,
-            0b11001110 => .into,
-            0b11001111 => .iret,
-            0b11111000 => .clc,
-            0b11110101 => .cmc,
-            0b11111001 => .stc,
-            0b11111100 => .cld,
-            0b11111101 => .std,
-            0b11111010 => .cli,
-            0b11111011 => .sti,
-            0b11110100 => .hlt,
-            0b10011011 => .wait,
-
-            else => return .unknown,
-        };
-    }
-
-    pub fn init2(bytes: [2]u8) Mnemonic {
-        const first_try = Mnemonic.init(bytes[0]);
-        if (first_try != .unknown) return first_try;
-
-        return switch (bytes[0]) {
-            // add, sub, cmp, etc imm from reg/mem
-            0b10000000...0b10000011 => switch (bytes[1] & 0b00111000) {
-                0b00000000 => .add,
-                0b00010000 => .adc,
-                0b00101000 => .sub,
-                0b00011000 => .sbb,
-                0b00111000 => .cmp,
-                0b00100000 => .@"and",
-                0b00001000 => .@"or",
-                0b00110000 => .xor,
-                else => .unknown,
-            },
-
-            // mul, imul, div, idiv, neg, not, test
-            0b11110110...0b11110111 => switch (bytes[1] & 0b00111000) {
-                0b00100000 => .mul,
-                0b00101000 => .imul,
-                0b00110000 => .div,
-                0b00111000 => .idiv,
-                0b00011000 => .neg,
-                0b00010000 => .not,
-                0b00000000 => .@"test",
-                else => .unknown,
-            },
-
-            // shifts and rotates
-            0b11010000...0b11010011 => switch (bytes[1] & 0b00111000) {
-                0b00100000 => .shl,
-                0b00101000 => .shr,
-                0b00111000 => .sar,
-                0b00000000 => .rol,
-                0b00001000 => .ror,
-                0b00010000 => .rcl,
-                0b00011000 => .rcr,
-                else => .unknown,
-            },
-
-            // push, inc, dec reg/mem
-            // call, indirect jump
-            0b11111110...0b11111111 => switch (bytes[1] & 0b00111000) {
-                0b00000000 => .inc,
-                0b00001000 => .dec,
-                0b00110000 => .push,
-                0b00010000 => .call,
-                0b00011000 => .@"call far",
-                0b00100000 => .jmp,
-                0b00101000 => .@"jmp far",
-                else => .unknown,
-            },
-
-            else => .unknown,
-        };
-    }
-};
-
-// TODO consider merging Register and Immediate
-
 /// Convert reg bits and the w flag to a register name.
-fn bitsToReg(reg: u3, w: u1) Register {
+fn bitsToReg(reg: u3, w: u1) nms.Register {
     // see table 4-9 in the 8086 users manual. we combine the bits into a 4 bit number,
     // taking w to be the most significant bit
     var i: u4 = w;
     i <<= 3;
     i |= reg;
-    return @intToEnum(Register, i);
+    return @intToEnum(nms.Register, i);
 }
 
 /// Convert reg bits to segment register
-fn bitsToSegReg(reg: u2) Register {
-    return @intToEnum(Register, @enumToInt(Register.es) + reg);
+fn bitsToSegReg(reg: u2) nms.Register {
+    return @intToEnum(nms.Register, @enumToInt(nms.Register.es) + reg);
 }
 
 /// Convert prefix bits to Prefix
@@ -394,6 +42,227 @@ fn bitsToPrefix(byte: u8) Prefix {
         0b00110110 => .{ .seg = .ss },
         0b00111110 => .{ .seg = .ds },
         else => .{ .none = {} },
+    };
+}
+
+fn bitsToMnemonic(byte: u8) nms.Mnemonic {
+    // see table 4-12
+    return switch (byte) {
+        0b10001000...0b10001011, // mov reg/mem to/from reg
+        0b11000110...0b11000111, // mov imm to reg/mem
+        0b10110000...0b10111111, // mov imm to reg
+        0b10100000...0b10100011, // mov ax/mem to ax/mem
+        0b10001110, // reg/mem to segreg
+        0b10001100, // segreg to reg/mem
+        => return .mov,
+
+        0b00000000...0b00000011, // add reg/mem with reg to reg/mem
+        0b00000100...0b00000101, // add imm to ax
+        => return .add,
+
+        0b00010000...0b00010011, // adc reg/mem with reg to reg/mem
+        0b00010100...0b00010101, // add imm to ax
+        => return .adc,
+
+        0b01000000...0b01000111, // inc register
+        => return .inc,
+
+        0b00110111 => return .aaa,
+        0b00100111 => return .daa,
+        0b00111111 => return .aas,
+        0b00101111 => return .das,
+        0b11010100 => return .aam,
+        0b11010101 => return .aad,
+        0b10011000 => return .cbw,
+        0b10011001 => return .cwd,
+
+        0b00101000...0b00101011, // sub reg/mem from reg to reg/mem
+        0b00101100...0b00101101, // sub imm to ax
+        => return .sub,
+
+        0b00011000...0b00011011, // sbb reg/mem from reg to reg/mem
+        0b00011100...0b00011101, // sbb imm to ax
+        => return .sbb,
+
+        0b00111000...0b00111011, // cmp reg/mem and reg
+        0b00111100...0b00111101, // cmp imm with ax
+        => return .cmp,
+
+        0b01001000...0b01001111, // dec register
+        => return .dec,
+
+        0b00100000...0b00100011, // and reg/mem and reg
+        0b00100100...0b00100101, // and imm with ax
+        => return .@"and",
+
+        0b00001000...0b00001011, // or reg/mem with reg
+        0b00001100...0b00001101, // or imm with ax
+        => return .@"or",
+
+        0b00110000...0b00110011, // xor reg/mem with reg
+        0b00110100...0b00110101, // xor imm with ax
+        => return .xor,
+
+        0b10000100...0b10000101, // test
+        0b10101000...0b10101001, // test with ax
+        => return .@"test",
+
+        0b11000011 => return .ret, // within segment
+        0b11000010 => return .ret, // within segment
+        0b11001011 => return .retf, // inter segment
+        0b11001010 => return .retf, // inter segment
+        0b10011010 => return .call, // inter segment
+        0b11101010 => return .jmp, // inter segment
+        0b11101001 => return .jmp, // jmp direct within segment
+        0b11101000 => return .call, // call direct within segment
+        0b11101011 => return .jmp, // jmp direct withing segment - short
+        0b01110100 => return .je,
+        0b01111100 => return .jl,
+        0b01111110 => return .jle,
+        0b01110010 => return .jb,
+        0b01110110 => return .jbe,
+        0b01111010 => return .jp,
+        0b01110000 => return .jo,
+        0b01111000 => return .js,
+        0b01110101 => return .jne,
+        0b01111101 => return .jnl,
+        0b01111111 => return .jg,
+        0b01110011 => return .jnb,
+        0b01110111 => return .jnbe,
+        0b01111011 => return .jnp,
+        0b01110001 => return .jno,
+        0b01111001 => return .jns,
+        0b11100010 => return .loop,
+        0b11100001 => return .loopz,
+        0b11100000 => return .loopnz,
+        0b11100011 => return .jcxz,
+
+        0b01010000...0b01010111,
+        0b00000110,
+        0b00001110,
+        0b00010110,
+        0b00011110,
+        0b00100110,
+        0b00101110,
+        0b00110110,
+        0b00111110,
+        => return .push,
+
+        0b10001111,
+        0b01011000...0b01011111,
+        0b00000111,
+        0b00001111,
+        0b00010111,
+        0b00011111,
+        => return .pop,
+
+        0b10011100 => return .pushf,
+        0b10011101 => return .popf,
+
+        0b10000110...0b10000111,
+        0b10010000...0b10010111,
+        => return .xchg,
+
+        0b11100100...0b11100101,
+        0b11101100...0b11101101,
+        => return .in,
+
+        0b11100110...0b11100111,
+        0b11101110...0b11101111,
+        => return .out,
+
+        0b11010111 => return .xlat,
+        0b10001101 => return .lea,
+        0b11000101 => return .lds,
+        0b11000100 => return .les,
+        0b10011111 => return .lahf,
+        0b10011110 => return .sahf,
+
+        0b1010_010_0 => .movsb,
+        0b1010_011_0 => .cmpsb,
+        0b1010_111_0 => .scasb,
+        0b1010_110_0 => .lodsb,
+        0b1010_101_0 => .stosb,
+        0b1010_010_1 => .movsw,
+        0b1010_011_1 => .cmpsw,
+        0b1010_111_1 => .scasw,
+        0b1010_110_1 => .lodsw,
+        0b1010_101_1 => .stosw,
+
+        0b11001101 => .int,
+        0b11001100 => .int3,
+        0b11001110 => .into,
+        0b11001111 => .iret,
+        0b11111000 => .clc,
+        0b11110101 => .cmc,
+        0b11111001 => .stc,
+        0b11111100 => .cld,
+        0b11111101 => .std,
+        0b11111010 => .cli,
+        0b11111011 => .sti,
+        0b11110100 => .hlt,
+        0b10011011 => .wait,
+
+        else => return .unknown,
+    };
+}
+
+fn bitsToMnemonic2(bytes: [2]u8) nms.Mnemonic {
+    const first_try = bitsToMnemonic(bytes[0]);
+    if (first_try != .unknown) return first_try;
+
+    return switch (bytes[0]) {
+        // add, sub, cmp, etc imm from reg/mem
+        0b10000000...0b10000011 => switch (bytes[1] & 0b00111000) {
+            0b00000000 => .add,
+            0b00010000 => .adc,
+            0b00101000 => .sub,
+            0b00011000 => .sbb,
+            0b00111000 => .cmp,
+            0b00100000 => .@"and",
+            0b00001000 => .@"or",
+            0b00110000 => .xor,
+            else => .unknown,
+        },
+
+        // mul, imul, div, idiv, neg, not, test
+        0b11110110...0b11110111 => switch (bytes[1] & 0b00111000) {
+            0b00100000 => .mul,
+            0b00101000 => .imul,
+            0b00110000 => .div,
+            0b00111000 => .idiv,
+            0b00011000 => .neg,
+            0b00010000 => .not,
+            0b00000000 => .@"test",
+            else => .unknown,
+        },
+
+        // shifts and rotates
+        0b11010000...0b11010011 => switch (bytes[1] & 0b00111000) {
+            0b00100000 => .shl,
+            0b00101000 => .shr,
+            0b00111000 => .sar,
+            0b00000000 => .rol,
+            0b00001000 => .ror,
+            0b00010000 => .rcl,
+            0b00011000 => .rcr,
+            else => .unknown,
+        },
+
+        // push, inc, dec reg/mem
+        // call, indirect jump
+        0b11111110...0b11111111 => switch (bytes[1] & 0b00111000) {
+            0b00000000 => .inc,
+            0b00001000 => .dec,
+            0b00110000 => .push,
+            0b00010000 => .call,
+            0b00011000 => .@"call far",
+            0b00100000 => .jmp,
+            0b00101000 => .@"jmp far",
+            else => .unknown,
+        },
+
+        else => .unknown,
     };
 }
 
@@ -622,7 +491,7 @@ const InstructionParts = struct {
 /// The main instruction struct. Each instruction is decoded into an instance of this.
 const Instruction = struct {
     prefixes: [2]Prefix,
-    mnemonic: Mnemonic,
+    mnemonic: nms.Mnemonic,
     /// Destination operand(s). Some instructions only make use of 1 or 2 operands, in
     /// which case the decoder will fill the buffer with `Operand.none`.
     destination: SrcDst,
@@ -634,7 +503,7 @@ const Instruction = struct {
 };
 
 /// Iterate through a byte buffer and produce `Instruction`s.
-const DecodeIterator = struct {
+pub const DecodeIterator = struct {
     bytes: []const u8,
     index: usize = 0,
 
@@ -684,7 +553,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = if (d_bit) ip.reg else ip.mod_rm,
                     .source = if (d_bit) ip.mod_rm else ip.reg,
                     .encoded_bytes = ip.encoded_bytes,
@@ -717,7 +586,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = if (d_bit) ip.reg else ip.mod_rm,
                     .source = if (d_bit) ip.mod_rm else ip.reg,
                     .encoded_bytes = ip.encoded_bytes,
@@ -741,7 +610,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = ip.reg,
                     .encoded_bytes = ip.encoded_bytes,
@@ -771,7 +640,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = ip.reg,
                     .source = ip.mod_rm,
                     .encoded_bytes = ip.encoded_bytes,
@@ -810,7 +679,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = ip.immediate.?,
                     .encoded_bytes = ip.encoded_bytes,
@@ -852,7 +721,7 @@ const DecodeIterator = struct {
 
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{reg}, pre),
                     .source = SrcDst.init(1, .{imm}, pre),
                     .encoded_bytes = @as(u8, 2) + w,
@@ -877,7 +746,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = if (has_immediate) ip.immediate.? else SrcDst.init(0, .{}, undefined), // TODO consider making this null
                     .encoded_bytes = ip.encoded_bytes,
@@ -898,7 +767,7 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .reg = reg }}, Prefix.init1C(.byte)),
                     .source = SrcDst.init(0, .{}, Prefix.init1C(.byte)),
                     .encoded_bytes = 1,
@@ -920,7 +789,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = imm_srcdst,
                     .encoded_bytes = 3,
@@ -953,7 +822,7 @@ const DecodeIterator = struct {
 
                 var i = Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init2(slice[0..2].*),
+                    .mnemonic = bitsToMnemonic2(slice[0..2].*),
                     .destination = ip.mod_rm,
                     .source = source,
                     .encoded_bytes = ip.encoded_bytes,
@@ -1002,7 +871,7 @@ const DecodeIterator = struct {
                 const byte1 = self.bytes[self.index + 1];
                 const byte2 = self.bytes[self.index + 2];
 
-                const reg: Register = if (w == 0) .al else .ax;
+                const reg: nms.Register = if (w == 0) .al else .ax;
                 const reg_ops = SrcDst.init(1, .{.{ .reg = reg }}, Prefix.init1C(.byte));
 
                 const addr8 = byte1;
@@ -1068,7 +937,7 @@ const DecodeIterator = struct {
 
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = jump_amount,
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 2,
@@ -1085,7 +954,7 @@ const DecodeIterator = struct {
                 const ip_sd = SrcDst.init(1, .{.{ .imm = .{ .imm16 = ip } }}, .{ .{ .imm = cs }, .none });
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = ip_sd,
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 5,
@@ -1105,7 +974,7 @@ const DecodeIterator = struct {
                 const ip_sd = SrcDst.init(1, .{.{ .imm = .{ .imm16 = ip } }}, .{ .none, .none });
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = ip_sd,
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 3,
@@ -1120,7 +989,7 @@ const DecodeIterator = struct {
                 const ip_sd = SrcDst.init(1, .{.{ .imm = .{ .imm16 = ip } }}, .{ .none, .none });
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = ip_sd,
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
@@ -1134,7 +1003,7 @@ const DecodeIterator = struct {
                 const byte1 = self.bytes[self.index + 1];
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .imm = .{ .imm16 = @as(i16, byte1) } }}, .{ .none, .none }),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 2,
@@ -1168,7 +1037,7 @@ const DecodeIterator = struct {
                     }
                 };
 
-                const mn = Mnemonic.init(self.bytes[self.index]);
+                const mn = bitsToMnemonic(self.bytes[self.index]);
                 var src_ptr = &src;
                 var dst_ptr = &dest;
                 if (mn == .out) std.mem.swap(*const SrcDst, &src_ptr, &dst_ptr);
@@ -1198,7 +1067,7 @@ const DecodeIterator = struct {
                 const reg = bitsToSegReg(@truncate(u2, self.bytes[self.index] >> 3));
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = SrcDst.init(1, .{.{ .reg = reg }}, Prefix.init1C(.word)),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
@@ -1246,7 +1115,7 @@ const DecodeIterator = struct {
                 defer self.index += 1;
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 1,
@@ -1261,7 +1130,7 @@ const DecodeIterator = struct {
                 defer self.index += 2;
                 return Instruction{
                     .prefixes = prefixes.*,
-                    .mnemonic = Mnemonic.init(self.bytes[self.index]),
+                    .mnemonic = bitsToMnemonic(self.bytes[self.index]),
                     .destination = SrcDst.init(0, .{}, undefined),
                     .source = SrcDst.init(0, .{}, undefined),
                     .encoded_bytes = 2,
@@ -1496,23 +1365,23 @@ pub fn decodeAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.
 test "bitsToReg" {
     // from table 4-9 in intel 8086 users manual
 
-    try expectEq(Register.al, bitsToReg(0b000, 0));
-    try expectEq(Register.cl, bitsToReg(0b001, 0));
-    try expectEq(Register.dl, bitsToReg(0b010, 0));
-    try expectEq(Register.bl, bitsToReg(0b011, 0));
-    try expectEq(Register.ah, bitsToReg(0b100, 0));
-    try expectEq(Register.ch, bitsToReg(0b101, 0));
-    try expectEq(Register.dh, bitsToReg(0b110, 0));
-    try expectEq(Register.bh, bitsToReg(0b111, 0));
+    try expectEq(nms.Register.al, bitsToReg(0b000, 0));
+    try expectEq(nms.Register.cl, bitsToReg(0b001, 0));
+    try expectEq(nms.Register.dl, bitsToReg(0b010, 0));
+    try expectEq(nms.Register.bl, bitsToReg(0b011, 0));
+    try expectEq(nms.Register.ah, bitsToReg(0b100, 0));
+    try expectEq(nms.Register.ch, bitsToReg(0b101, 0));
+    try expectEq(nms.Register.dh, bitsToReg(0b110, 0));
+    try expectEq(nms.Register.bh, bitsToReg(0b111, 0));
 
-    try expectEq(Register.ax, bitsToReg(0b000, 1));
-    try expectEq(Register.cx, bitsToReg(0b001, 1));
-    try expectEq(Register.dx, bitsToReg(0b010, 1));
-    try expectEq(Register.bx, bitsToReg(0b011, 1));
-    try expectEq(Register.sp, bitsToReg(0b100, 1));
-    try expectEq(Register.bp, bitsToReg(0b101, 1));
-    try expectEq(Register.si, bitsToReg(0b110, 1));
-    try expectEq(Register.di, bitsToReg(0b111, 1));
+    try expectEq(nms.Register.ax, bitsToReg(0b000, 1));
+    try expectEq(nms.Register.cx, bitsToReg(0b001, 1));
+    try expectEq(nms.Register.dx, bitsToReg(0b010, 1));
+    try expectEq(nms.Register.bx, bitsToReg(0b011, 1));
+    try expectEq(nms.Register.sp, bitsToReg(0b100, 1));
+    try expectEq(nms.Register.bp, bitsToReg(0b101, 1));
+    try expectEq(nms.Register.si, bitsToReg(0b110, 1));
+    try expectEq(nms.Register.di, bitsToReg(0b111, 1));
 }
 
 /// Run an end to end decoder test. Given a "basename" that represents a file,
@@ -1694,5 +1563,7 @@ test "e2e 0045" {
 }
 
 const std = @import("std");
+const nms = @import("names.zig");
+
 const expectEq = std.testing.expectEqual;
 const expect = std.testing.expect;

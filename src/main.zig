@@ -10,12 +10,17 @@ pub fn main() !void {
 
     const filename = std.mem.span(std.os.argv[1]);
     try dec.decodeAndPrintFile(filename, std.io.getStdOut().writer(), gpa);
+
+    try sim.simulateAndPrintFile(filename, std.io.getStdOut().writer(), gpa);
     return;
 }
 
 test {
     _ = @import("decode.zig");
+    _ = @import("simulate.zig");
+    _ = @import("names.zig");
 }
 
 const std = @import("std");
 const dec = @import("decode.zig");
+const sim = @import("simulate.zig");
