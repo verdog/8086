@@ -1,6 +1,6 @@
 //! CPU/Memory simulation
 
-const Data = struct {
+pub const Data = struct {
     //! All simulated data, mainly registers and memory
 
     // registers
@@ -53,7 +53,7 @@ const Data = struct {
     }
 };
 
-pub fn simulateAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !void {
+pub fn simulateAndPrintFile(filename: []const u8, writer: anytype, alctr: std.mem.Allocator) !Data {
     var file = try std.fs.cwd().openFile(filename, .{});
     defer file.close();
 
@@ -125,6 +125,8 @@ pub fn simulateAndPrintFile(filename: []const u8, writer: anytype, alctr: std.me
     try writer.print("cs: 0x{0x:0>4} ({0})\n", .{data.cs});
     try writer.print("ss: 0x{0x:0>4} ({0})\n", .{data.ss});
     try writer.print("ds: 0x{0x:0>4} ({0})\n", .{data.ds});
+
+    return data;
 }
 
 test "Data.putRegister" {
@@ -160,7 +162,17 @@ test "Data.putRegister: handle 8 bit registers" {
 
 test "e2e listing_0043_immediate_movs" {
     const alctr = std.testing.allocator;
-    try tst.simulateEndToEnd("listing_0043_immediate_movs", alctr);
+    const data = Data{
+        .ax = 1,
+        .bx = 2,
+        .cx = 3,
+        .dx = 4,
+        .sp = 5,
+        .bp = 6,
+        .si = 7,
+        .di = 8,
+    };
+    try tst.simulateEndToEnd("listing_0043_immediate_movs", data, alctr);
 }
 
 const std = @import("std");

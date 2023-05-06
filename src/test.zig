@@ -59,14 +59,19 @@ pub fn decodeEndToEnd(comptime basename: []const u8, alctr: std.mem.Allocator) !
     }
 }
 
-pub fn simulateEndToEnd(comptime basename: []const u8, alctr: std.mem.Allocator) !void {
+pub fn simulateEndToEnd(comptime basename: []const u8, ref_data: sim.Data, alctr: std.mem.Allocator) !void {
     // generate binary file to simulate
     try compileAsmFile(basename, "asm", "", alctr);
 
     // simulate it
     const simulated = try std.fs.cwd().createFile("./testfs/" ++ basename ++ ".sim", .{});
     defer simulated.close();
-    try sim.simulateAndPrintFile("./testfs/" ++ basename, simulated.writer(), alctr);
+
+    const data = try sim.simulateAndPrintFile("./testfs/" ++ basename, simulated.writer(), alctr);
+    errdefer {
+        std.debug.print("ref: {}\n\nact: {}\n\n", .{ ref_data, data });
+    }
+    try expectEq(ref_data, data);
 }
 
 const std = @import("std");
